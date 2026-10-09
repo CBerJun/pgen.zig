@@ -1,0 +1,36 @@
+# The very first bootstrapping meta grammar
+# This was hand-translated into a CFG, so an initial meta parser is
+# available; in later iterations, one can use the meta parser to parse
+# the (possibly modified) meta grammar and create new meta parsers.
+
+tokens {
+    WORD;
+    STRING;
+    "";
+    ""k;
+}
+
+entry grammar;
+
+grammar:
+    "tokens"k "{"
+        token_decl+
+    "}"
+    "entry"k WORD ";"
+    production+;
+# String must be empty in token_decl but no way to enforce that
+token_decl: (WORD | STRING) ";";
+production: nonterminal_qualifier WORD ":" rhs ";";
+nonterminal_qualifier: "nodeless"k?;
+
+rhs_atom:
+    WORD  # Non-terminal/terminal
+    | STRING  # Terminal, must be nonempty but no way to enforce that
+    | "(" rhs ")"
+    | "[" rhs "]";  # Optional
+# Stacking * and + (e.g. "*+") never makes sense
+rhs_term: rhs_atom ("*" | "+")?;
+rhs_factor:
+    rhs_term+
+    | "epsilon"k;
+rhs: rhs_factor ("|" rhs_factor)*;

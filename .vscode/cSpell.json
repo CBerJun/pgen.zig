@@ -1,0 +1,23 @@
+// cSpell (a spell checker) config for VSCode.
+{
+    "version": "0.2",
+    "words": [
+        "nonterminal",
+        "nonterminals",
+        "pgen",
+        "ebnf",
+        "lalr",
+        "succ",
+        "tarjan",
+        "sccs",
+        "memset",
+        "memcpy",
+        "precomputes",
+        "bitsets",
+        "subarray",
+        "subarrays",
+        "wyhash",
+        "nodeless",
+        "subexpression",
+    ]
+}
