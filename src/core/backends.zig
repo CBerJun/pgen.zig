@@ -123,7 +123,7 @@ const ZigEmitter = struct {
             for (collection.literals) |literal| {
                 try self.out.writeAll("            .{ \"");
                 try std.zig.stringEscape(literal, self.out);
-                try self.out.print("\", @fromBackingInt({}) }},\n", .{terminal_id});
+                try self.out.print("\", @enumFromInt({}) }},\n", .{terminal_id});
                 terminal_id += 1;
             }
             try self.out.writeAll("        });\n");
@@ -288,7 +288,7 @@ const ZigEmitter = struct {
             \\            errdefer allocator.free(children);
             \\            try self.node_stack.resize(allocator, node_lo);
             \\            try self.node_stack.append(allocator, .{.internal = .{
-            \\                .nonterminal = @fromBackingInt(lhs),
+            \\                .nonterminal = @enumFromInt(lhs),
             \\                .children = children,
             \\            }});
             \\        }
@@ -511,7 +511,7 @@ pub const Lr0ZigSwitchBackend = struct {
         try self.emitter.writeProlog(self.grammar);
         try self.emitter.implementFeed();
         try self.emitter.out.writeAll(
-            \\        const T = @backingInt(token.tag);
+            \\        const T = @intFromEnum(token.tag);
             \\        while (true) {
             \\            switch (self.state_stack.getLast()) {
             \\
@@ -674,7 +674,7 @@ pub fn ZigSwitchActionHandler(comptime ConflictResolver: type) type {
         pub fn writeFeedMethod(self: @This(), emitter: ZigEmitter) std.Io.Writer.Error!void {
             try emitter.implementFeed();
             try emitter.out.writeAll(
-                \\        const T = @backingInt(token.tag);
+                \\        const T = @intFromEnum(token.tag);
                 \\        while (true) {
                 \\            switch (self.state_stack.getLast()) {
                 \\

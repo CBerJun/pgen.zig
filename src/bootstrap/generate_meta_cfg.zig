@@ -127,20 +127,20 @@ const AuxNtManager = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    var arg_it = try std.process.argsWithAllocator(allocator);
+    var arg_it = try init.minimal.args.iterateAllocator(allocator);
     defer arg_it.deinit();
     std.debug.assert(arg_it.skip());
     const out_file_name = arg_it.next() orelse fatal("expected one argument (out file)", .{});
-    const file = try std.fs.cwd().createFile(out_file_name, .{});
-    defer file.close();
+    const file = try std.Io.Dir.cwd().createFile(init.io, out_file_name, .{});
+    defer file.close(init.io);
 
     var out_buffer: [512]u8 = undefined;
-    var out_writer = file.writer(&out_buffer);
+    var out_writer = file.writer(init.io, &out_buffer);
     const writer = &out_writer.interface;
 
     // --- Production list
