@@ -1,7 +1,3 @@
 # Build artifacts
 /.zig-cache/
 /zig-out/
-
-# Generated source
-/src/meta_cfg.zig
-/src/meta_parser.zig

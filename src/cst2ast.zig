@@ -1,7 +1,8 @@
 const std = @import("std");
-const psr = @import("./meta_parser.zig");
-const ast = @import("./ast.zig");
-const cfg = @import("./cfg.zig");
+const psr = @import("pgen_meta_parser");
+const pgen_core = @import("pgen_core");
+const ast = pgen_core.ast;
+const cfg = pgen_core.cfg;
 
 /// Managed `ast.Ebnf` with an arena allocator and `ExprPool` which holds
 /// the rhs EBNF nodes. This won't work if you have multiple `ast.Ebnf`s

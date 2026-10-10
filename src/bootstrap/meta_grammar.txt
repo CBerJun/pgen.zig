@@ -1,4 +1,6 @@
-# The very first bootstrapping meta grammar
+# The bootstrapping meta grammar
+# This file is purely informational: it does not participate in the
+# build process.
 # This was hand-translated into a CFG, so an initial meta parser is
 # available; in later iterations, one can use the meta parser to parse
 # the (possibly modified) meta grammar and create new meta parsers.

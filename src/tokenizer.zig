@@ -2,7 +2,7 @@
 //! parser), then to pooled AST.
 
 const std = @import("std");
-const psr = @import("./meta_parser.zig");
+const psr = @import("pgen_meta_parser");
 
 pub const Tokenizer = struct {
     reader: *std.Io.Reader,
