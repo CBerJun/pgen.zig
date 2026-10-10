@@ -229,6 +229,8 @@ fn buildProductions(pm: *ProductionManager, aux_manager: *AuxNtManager) !void {
     });
     try pm.prod(token_decl_list, .{Nt.token_decl});
     try pm.prod(token_decl_list, .{ token_decl_list, Nt.token_decl });
+    try pm.prod(production_list, .{Nt.production});
+    try pm.prod(production_list, .{ production_list, Nt.production });
     try pm.prod(.token_decl, .{ Terminal.WORD, Sym.@";" });
     try pm.prod(.token_decl, .{ Terminal.STRING, Sym.@";" });
     try pm.prod(.production, .{ Nt.nonterminal_qualifier, Terminal.WORD, Sym.@":", Nt.rhs, Sym.@";" });
