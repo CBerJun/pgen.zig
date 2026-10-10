@@ -23,7 +23,7 @@ grammar:
 # String must be empty in token_decl but no way to enforce that
 token_decl: (WORD | STRING) ";";
 production: nonterminal_qualifier WORD ":" rhs ";";
-nonterminal_qualifier: "nodeless"k?;
+nonterminal_qualifier: ["nodeless"k];
 
 rhs_atom:
     WORD  # Non-terminal/terminal
@@ -31,7 +31,7 @@ rhs_atom:
     | "(" rhs ")"
     | "[" rhs "]";  # Optional
 # Stacking * and + (e.g. "*+") never makes sense
-rhs_term: rhs_atom ("*" | "+")?;
+rhs_term: rhs_atom ["*" | "+"];
 rhs_factor:
     rhs_term+
     | "epsilon"k;
