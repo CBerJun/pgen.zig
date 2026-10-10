@@ -95,7 +95,7 @@ const ZigEmitter = struct {
             \\
             \\    pub const Tag = enum(u{}) {{
             \\
-        , .{std.math.log2_int_ceil(u32, grammar.terminals.count)});
+        , .{self.tagBackingIntBits(grammar)});
         for (grammar.terminals.literal) |collection| {
             for (collection.literals) |content| {
                 try self.out.print("        @\"{s}.", .{collection.suffix});
@@ -123,7 +123,7 @@ const ZigEmitter = struct {
             for (collection.literals) |literal| {
                 try self.out.writeAll("            .{ \"");
                 try std.zig.stringEscape(literal, self.out);
-                try self.out.print("\", @enumFromInt({}) }},\n", .{terminal_id});
+                try self.out.print("\", @as(Tag, @enumFromInt({})) }},\n", .{terminal_id});
                 terminal_id += 1;
             }
             try self.out.writeAll("        });\n");
@@ -253,7 +253,7 @@ const ZigEmitter = struct {
             \\        return x;
             \\    }
             \\
-            \\    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+            \\    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
             \\        defer self.* = undefined;
             \\        self.state_stack.deinit(allocator);
             \\        self.node_count_stack.deinit(allocator);
@@ -262,18 +262,18 @@ const ZigEmitter = struct {
             \\
             \\    pub const Error = error{PgenParseError};
             \\
-            \\    pub fn endOfInput(self: @This(), allocator: std.mem.Allocator) (Error || std.mem.Allocator.Error)!CstNode {
-            \\        try self.feed(allocator, .eoi);
+            \\    /// Call after sending the last token (which must be EOI) to get the parse tree
+            \\    pub fn retrieve(self: *@This()) CstNode {
             \\        return self.node_stack.pop().?;
             \\    }
             \\
-            \\    fn shift(self: @This(), allocator: std.mem.Allocator, token: Token, new_state: StateSize) std.mem.Allocator.Error!void {
+            \\    fn shift(self: *@This(), allocator: std.mem.Allocator, token: Token, new_state: StateSize) std.mem.Allocator.Error!void {
             \\        try self.state_stack.append(allocator, new_state);
             \\        try self.node_stack.append(allocator, .{.leaf = token});
             \\        try self.node_count_stack.append(allocator, 1);
             \\    }
             \\
-            \\    fn reduce(self: @This(), allocator: std.mem.Allocator, rhs_len: u32, lhs: NtSize, comptime form_node: bool) std.mem.Allocator.Error!void {
+            \\    fn reduce(self: *@This(), allocator: std.mem.Allocator, rhs_len: u32, lhs: NtSize, comptime form_node: bool) std.mem.Allocator.Error!void {
             \\        const hi = self.node_count_stack.items.len;
             \\        const lo = hi - rhs_len;
             \\        var x: NodeCountSize = 0;
@@ -284,7 +284,7 @@ const ZigEmitter = struct {
             \\        try self.node_count_stack.append(allocator, if (form_node) 1 else x);
             \\        if (form_node) {
             \\            const node_lo = self.node_stack.items.len - x;
-            \\            const children = try allocator.dupe(CstNode, self.node_stack[node_lo..]);
+            \\            const children = try allocator.dupe(CstNode, self.node_stack.items[node_lo..]);
             \\            errdefer allocator.free(children);
             \\            try self.node_stack.resize(allocator, node_lo);
             \\            try self.node_stack.append(allocator, .{.internal = .{
@@ -300,7 +300,15 @@ const ZigEmitter = struct {
             \\
             \\    const NtSize = u{};
             \\
-        , .{std.math.log2_int_ceil(u32, grammar.nonterminals.count)});
+        , .{self.ntBits(grammar)});
+    }
+
+    pub fn tagBackingIntBits(_: @This(), grammar: *const cfg.Cfg) u16 {
+        return std.math.log2_int_ceil(u32, grammar.terminals.count);
+    }
+
+    pub fn ntBits(_: @This(), grammar: *const cfg.Cfg) u16 {
+        return std.math.log2_int_ceil(u32, grammar.nonterminals.count);
     }
 
     pub fn writeReduceCall(self: @This(), grammar: *const cfg.Cfg, prod_id: u32) std.Io.Writer.Error!void {
@@ -313,12 +321,16 @@ const ZigEmitter = struct {
         });
     }
 
+    pub fn stateBits(_: @This(), num_states: usize) u16 {
+        return std.math.log2_int_ceil(usize, num_states);
+    }
+
     pub fn writeEpilog(self: @This(), num_states: usize) std.Io.Writer.Error!void {
         try self.out.print(
             \\
             \\    const StateSize = u{};
             \\
-        , .{std.math.log2_int_ceil(usize, num_states)});
+        , .{self.stateBits(num_states)});
         if (self.node_count_bits > 0) {
             try self.out.print(
                 \\    const NodeCountSize = u{};
@@ -337,7 +349,7 @@ const ZigEmitter = struct {
     pub fn implementFeed(self: @This()) std.Io.Writer.Error!void {
         try self.out.writeAll(
             \\
-            \\    pub fn feed(self: @This(), allocator: std.mem.Allocator, token: Token) (Error || std.mem.Allocator.Error)!void {
+            \\    pub fn feed(self: *@This(), allocator: std.mem.Allocator, token: Token) (Error || std.mem.Allocator.Error)!void {
             \\
         );
     }
@@ -345,7 +357,7 @@ const ZigEmitter = struct {
     pub fn implementGoto(self: @This()) std.Io.Writer.Error!void {
         try self.out.writeAll(
             \\
-            \\    fn goto(self: @This(), allocator: std.mem.Allocator, nt: NtSize) std.mem.Allocator.Error!void {
+            \\    fn goto(self: *@This(), allocator: std.mem.Allocator, nt: NtSize) std.mem.Allocator.Error!void {
             \\
         );
     }
@@ -409,26 +421,35 @@ pub const ZigSwitchGotoHandler = struct {
         const row = &self.goto_table.items[self.goto_table.items.len - 1];
         try row.append(allocator, .{ .nonterminal = nt, .new_state = state });
     }
-    pub fn writeGotoMethod(self: @This(), emitter: ZigEmitter) std.Io.Writer.Error!void {
+    pub fn writeGotoMethod(self: @This(), emitter: ZigEmitter, grammar: *const cfg.Cfg, num_states: u32) std.Io.Writer.Error!void {
         try emitter.implementGoto();
         try emitter.out.writeAll(
             \\        const state = self.state_stack.getLast();
             \\        try self.state_stack.append(allocator, switch (state) {
             \\
         );
-        for (0..self.goto_table.items.len) |state| {
-            const goto_entries = self.goto_table.items[state].items;
+        var skipped_prong = false;
+        for (self.goto_table.items, 0..) |table_row, state| {
+            const goto_entries = table_row.items;
             if (goto_entries.len == 0) {
-                continue; // Unreachable state for GOTO table, no need to generate a switch
+                skipped_prong = true;
+                continue; // Unreachable state for GOTO table, no need to generate a branch
             }
             try emitter.out.print("{} => switch (nt) {{", .{state});
             for (goto_entries) |entry| {
                 try emitter.out.print("{} => {}, ", .{ entry.nonterminal, entry.new_state });
             }
-            try emitter.out.writeAll("else => unreachable},\n");
+            // Zig disallows extraneous else prong
+            if (goto_entries.len < (@as(usize, 1) << @intCast(emitter.ntBits(grammar)))) {
+                try emitter.out.writeAll("else => unreachable");
+            }
+            try emitter.out.writeAll("},\n");
+        }
+        // Zig disallows extraneous else prong
+        if (skipped_prong or self.goto_table.items.len < (@as(usize, 1) << @intCast(emitter.stateBits(num_states)))) {
+            try emitter.out.writeAll("else => unreachable");
         }
         try emitter.out.writeAll(
-            \\else => unreachable,
             \\        });
             \\
         );
@@ -517,6 +538,8 @@ pub const Lr0ZigSwitchBackend = struct {
             \\
         );
         const num_states = self.states.?.items.len;
+        const state_bits = self.emitter.stateBits(num_states);
+        const tag_bits = self.emitter.tagBackingIntBits(self.grammar);
         for (0..num_states) |state| {
             const action_row = self.action_table.items[state];
             try self.emitter.out.print("{} => {{", .{state});
@@ -539,19 +562,26 @@ pub const Lr0ZigSwitchBackend = struct {
                             try self.emitter.out.print("{} => try self.shift(allocator, token, {}), ", .{ entry.terminal, entry.new_state });
                         }
                     }
-                    try self.emitter.out.writeAll("else => return Error.PgenParseError} return;");
+                    // Zig disallows extraneous else prong
+                    if (shifts.items.len < (@as(usize, 1) << @intCast(tag_bits))) {
+                        try self.emitter.out.writeAll("else => return Error.PgenParseError");
+                    }
+                    try self.emitter.out.writeAll("} return;");
                 },
             }
             try self.emitter.out.writeAll("},\n");
         }
+        // Zig disallows extraneous else prong
+        if (num_states < (@as(usize, 1) << @intCast(state_bits))) {
+            try self.emitter.out.writeAll("else => unreachable");
+        }
         try self.emitter.out.writeAll(
-            \\else => unreachable,
             \\            }
             \\        }
             \\
         );
         try self.emitter.endMethod();
-        try self.goto_handler.writeGotoMethod(self.emitter);
+        try self.goto_handler.writeGotoMethod(self.emitter, self.grammar, @intCast(num_states));
         try self.emitter.writeEpilog(num_states);
     }
 };
@@ -680,9 +710,11 @@ pub fn ZigSwitchActionHandler(comptime ConflictResolver: type) type {
                 \\
             );
             const num_states = self.action_table.items.len;
-            for (0..num_states) |state| {
+            const state_bits = emitter.stateBits(num_states);
+            const tag_bits = emitter.tagBackingIntBits(self.grammar);
+            for (self.action_table.items, 0..) |action_row, state| {
                 try emitter.out.print("{} => switch (T) {{", .{state});
-                var it = self.action_table.items[state].iterator();
+                var it = action_row.iterator();
                 while (it.next()) |entry| {
                     const terminal = entry.key_ptr.*;
                     try emitter.out.print("{} => ", .{terminal});
@@ -702,10 +734,17 @@ pub fn ZigSwitchActionHandler(comptime ConflictResolver: type) type {
                         },
                     }
                 }
-                try emitter.out.writeAll("else => return Error.PgenParseError},\n");
+                // Zig disallows extraneous else prong
+                if (action_row.size < (@as(u32, 1) << @intCast(tag_bits))) {
+                    try emitter.out.writeAll("else => return Error.PgenParseError");
+                }
+                try emitter.out.writeAll("},\n");
+            }
+            // Zig disallows extraneous else prong
+            if (num_states < (@as(usize, 1) << @intCast(state_bits))) {
+                try emitter.out.writeAll("else => unreachable");
             }
             try emitter.out.writeAll(
-                \\else => unreachable,
                 \\            }
                 \\        }
                 \\
@@ -820,8 +859,8 @@ pub fn SlrBackend(comptime ActionHandler: type, comptime GotoHandler: type) type
         pub fn endTableGen(self: *@This()) Error!void {
             try self.emitter.writeProlog(self.grammar);
             try self.action_handler.writeFeedMethod(self.emitter);
-            try self.goto_handler.writeGotoMethod(self.emitter);
             const num_states = self.states.?.items.len;
+            try self.goto_handler.writeGotoMethod(self.emitter, self.grammar, @intCast(num_states));
             try self.emitter.writeEpilog(num_states);
         }
     };

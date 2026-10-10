@@ -1,5 +1,4 @@
-//! Convert grammar file to token stream, then to CST (done by the meta
-//! parser), then to pooled AST.
+//! Tokenizes input grammar file.
 
 const std = @import("std");
 const psr = @import("pgen_meta_parser");
@@ -10,8 +9,9 @@ pub const Tokenizer = struct {
     scrap_allocator: std.mem.Allocator,
     // Internal
     current_loc: psr.Token.Loc = .{ .ln = 0, .col = 0 },
+    sent_eoi: bool = false,
 
-    pub const Error = std.Io.Reader.Error || std.mem.Allocator.Error || error{InvalidSyntax};
+    pub const Error = error{ReadFailed} || std.mem.Allocator.Error || error{InvalidSyntax};
 
     /// Keep reading characters into `al` until a character that cannot be a
     /// continue character in an identifier appears. Allocates with
@@ -22,7 +22,7 @@ pub const Tokenizer = struct {
                 error.ReadFailed => |e| return e,
                 error.EndOfStream => break,
             };
-            if (std.ascii.isAlphanumeric(ch) || ch == '_') {
+            if (std.ascii.isAlphanumeric(ch) or ch == '_') {
                 self.reader.toss(1);
                 try al.append(self.payload_allocator, ch);
             } else {
@@ -33,7 +33,7 @@ pub const Tokenizer = struct {
 
     /// Whether `ch` can be first character of an identifier.
     fn isIdStart(ch: u8) bool {
-        return std.ascii.isAlphabetic(ch) || ch == '_';
+        return std.ascii.isAlphabetic(ch) or ch == '_';
     }
 
     /// Read quoted string assuming the starting '"' is already consumed.
@@ -81,19 +81,25 @@ pub const Tokenizer = struct {
                     },
                     '"' => unreachable,
                     '\n' => return error.InvalidSyntax, // Unclosed '"' (newline)
-                    else => string.appendAssumeCapacity(buf[i]),
+                    else => {
+                        string.appendAssumeCapacity(buf[i]);
+                        i += 1;
+                    },
                 }
             }
             allocating_writer.clearRetainingCapacity();
         }
-        return .{ bytes_consumed, string.toOwnedSlice(self.payload_allocator) };
+        return .{ bytes_consumed, try string.toOwnedSlice(self.payload_allocator) };
     }
 
     /// Get the next token. Newly created token must be deinited with
     /// `self.payload_allocator`.
-    pub fn nextToken(self: *@This()) Error!psr.Token {
+    pub fn nextToken(self: *@This()) Error!?psr.Token {
         while (true) {
-            const first = try self.reader.takeByte();
+            const first = self.reader.takeByte() catch |err| switch (err) {
+                error.EndOfStream => return self.eoiToken(),
+                error.ReadFailed => |e| return e,
+            };
             if (isIdStart(first)) {
                 var identifier: std.ArrayListUnmanaged(u8) = .empty;
                 errdefer identifier.deinit(self.payload_allocator);
@@ -107,7 +113,7 @@ pub const Tokenizer = struct {
                     return .{ .tag = tag, .payload = .{ .none = void{} }, .loc = self.current_loc };
                 } else {
                     const payload = try identifier.toOwnedSlice(self.payload_allocator);
-                    return .{ .tag = .named.WORD, .payload = .{ .word = payload }, .loc = self.current_loc };
+                    return .{ .tag = .WORD, .payload = .{ .word = payload }, .loc = self.current_loc };
                 }
             } else if (first == '"') {
                 var bytes_consumed, const content = try self.readQuotedStr();
@@ -130,7 +136,7 @@ pub const Tokenizer = struct {
                 }
                 // Newline character cannot appear in a string literal
                 defer self.current_loc.col += bytes_consumed;
-                return .{ .tag = .named.STRING, .payload = .{ .str = .{ .content = content, .suffix = suffix } }, .loc = self.current_loc };
+                return .{ .tag = .STRING, .payload = .{ .str = .{ .content = content, .suffix = suffix } }, .loc = self.current_loc };
             } else if (first == '#') {
                 _ = self.reader.discardDelimiterInclusive('\n') catch |err| switch (err) {
                     error.ReadFailed => |e| return e,
@@ -150,5 +156,14 @@ pub const Tokenizer = struct {
                 return error.InvalidSyntax; // Invalid character
             }
         }
+    }
+
+    fn eoiToken(self: *@This()) ?psr.Token {
+        defer self.sent_eoi = true;
+        return if (self.sent_eoi) null else psr.Token{
+            .tag = .@"$",
+            .payload = .{ .none = void{} },
+            .loc = self.current_loc,
+        };
     }
 };
