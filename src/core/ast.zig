@@ -50,14 +50,17 @@ pub const Expr = union(enum) {
     /// Hash using identity (pointer) for sub-expressions; so sub-expressions
     /// would have to be interned for this to be useful.
     pub fn internedHash(self: @This()) u64 {
+        // In order to rely on `std.mem.sliceAsBytes` for `.concat` and `.choose`:
+        comptime std.debug.assert(std.meta.hasUniqueRepresentation([2]*const Expr));
         return switch (self) {
-            .epsilon => 0x20260702, // Magic hash value ^_^
-            .nonterminal, .terminal => |x| std.hash.int(x),
-            .zero_or_more, .one_or_more => |ptr| std.hash.int(@intFromPtr(ptr)),
-            .concat, .choose => |slice| blk: {
-                comptime std.debug.assert(std.meta.hasUniqueRepresentation(std.meta.Elem(slice)));
-                break :blk std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(slice));
-            },
+            // Lots of magic values (purely arbitrary)
+            .epsilon => 0x20260702,
+            .nonterminal => |x| std.hash.int(x),
+            .terminal => |x| std.hash.int(x ^ 0x20261010),
+            .zero_or_more => |ptr| std.hash.int(@intFromPtr(ptr)),
+            .one_or_more => |ptr| std.hash.int(@intFromPtr(ptr) ^ 0x20261010),
+            .concat => |slice| std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(slice)),
+            .choose => |slice| std.hash.Wyhash.hash(0x20261010, std.mem.sliceAsBytes(slice)),
         };
     }
 };
@@ -70,8 +73,8 @@ pub const Expr = union(enum) {
 /// (e.g. A | B is same as B | A).
 pub const ExprPool = struct {
     allocator: std.mem.Allocator,
-    hashmap: std.HashMapUnmanaged(*const Entry, void, HashContext, std.hash_map.default_max_load_percentage),
-    entries: std.ArrayListUnmanaged(Entry),
+    /// All key pointers are interned, so you can `getEntry` on them.
+    hashmap: std.HashMapUnmanaged(*const Expr, void, HashContext, std.hash_map.default_max_load_percentage),
 
     /// An entry in the pool representing one `Expr`. It contains extra
     /// objects used during AST-to-CFG.
@@ -86,11 +89,11 @@ pub const ExprPool = struct {
 
     /// Hash context used by `hashmap`.
     const HashContext = struct {
-        pub fn eql(_: @This(), lhs: *const Entry, rhs: *const Entry) bool {
-            return lhs.expr.internedEql(rhs.expr);
+        pub fn eql(_: @This(), lhs: *const Expr, rhs: *const Expr) bool {
+            return lhs.internedEql(rhs.*);
         }
-        pub fn hash(_: @This(), key: *const Entry) u64 {
-            return key.expr.internedHash();
+        pub fn hash(_: @This(), key: *const Expr) u64 {
+            return key.internedHash();
         }
     };
 
@@ -98,53 +101,51 @@ pub const ExprPool = struct {
         return .{
             .allocator = allocator,
             .hashmap = .empty,
-            .entries = .empty,
         };
     }
 
     pub fn deinit(self: *@This()) void {
-        for (self.entries.items) |*entry| {
-            entry.deinit(self.allocator);
+        // {
+        //     std.debug.print("deinit()\n", .{});
+        //     var it = self.hashmap.keyIterator();
+        //     while (it.next()) |key| {
+        //         std.debug.print("  {any}\n", .{key.*.*});
+        //     }
+        // }
+        var it = self.hashmap.keyIterator();
+        while (it.next()) |key| {
+            self.allocator.destroy(self.getEntry(key.*));
         }
         self.hashmap.deinit(self.allocator);
         self.* = undefined;
     }
 
-    /// Hash context used to put an `Expr` (potentially non-interned but with
-    /// all sub-expressions interned) into `self.hashmap`.
-    const PutHashContext = struct {
-        pub fn eql(_: @This(), key: Expr, test_key: *const Entry) bool {
-            return key.internedEql(test_key.expr);
-        }
-        pub fn hash(_: @This(), key: Expr) u64 {
-            return key.internedHash();
-        }
-    };
-
     /// `expr` must use `self.allocator`. Return a borrowed reference
     /// to the interned expr owned by the pool. The ownership of the expr
     /// passed in is destroyed or transferred to the pool.
     pub fn intern(self: *@This(), expr: Expr) std.mem.Allocator.Error!*const Expr {
-        const gop = try self.hashmap.getOrPutAdapted(self.allocator, expr, PutHashContext{});
+        // std.debug.print("intern({})\n", .{expr});
+        // var it = self.hashmap.keyIterator();
+        // while (it.next()) |key| {
+        //     std.debug.print("  {any}\n", .{key.*.*});
+        // }
+        const gop = try self.hashmap.getOrPut(self.allocator, &expr);
         if (gop.found_existing) {
-            expr.free(self.allocator);
+            var expr_var = expr;
+            expr_var.free(self.allocator);
         } else {
-            gop.key_ptr.* = try self.newEntry(expr);
+            const entry = try self.allocator.create(Entry);
+            gop.key_ptr.* = &entry.expr;
+            entry.expr = expr;
         }
-        return &gop.key_ptr.*.expr;
+        return gop.key_ptr.*;
     }
 
     /// Get the internal entry corresponding to an *interned* `Expr`.
     /// (Unchecked) illegal behavior is invoked if expression is not interned
     /// in this pool.
     pub fn getEntry(_: @This(), interned_expr: *const Expr) *Entry {
-        return @fieldParentPtr("expr", interned_expr);
-    }
-
-    fn newEntry(self: *@This(), expr: Expr) std.mem.Allocator.Error!*Entry {
-        const entry_ptr = try self.entries.addOne(self.allocator);
-        entry_ptr.expr = expr;
-        return entry_ptr;
+        return @fieldParentPtr("expr", @constCast(interned_expr));
     }
 
     pub fn makeEpsilon(self: *@This()) std.mem.Allocator.Error!*const Expr {
@@ -166,7 +167,8 @@ pub const ExprPool = struct {
             else => blk: {
                 const buf = try self.allocator.alloc(*const Expr, 2);
                 errdefer self.allocator.free(buf);
-                buf = .{ inner, try self.makeEpsilon() };
+                buf[0] = inner;
+                buf[1] = try self.makeEpsilon();
                 break :blk self.makeChoose(buf);
             },
         };
@@ -198,7 +200,7 @@ pub const ExprPool = struct {
         var free_operands = true;
         defer if (free_operands) self.allocator.free(operands);
         while (i < j) {
-            if (operands[i] == .epsilon) {
+            if (operands[i].* == .epsilon) {
                 std.mem.swap(*const Expr, &operands[i], &operands[j - 1]);
                 j -= 1;
             } else {
@@ -220,7 +222,7 @@ pub const ExprPool = struct {
         if (num_inner != j) {
             // There is some subexpression that is a `.concat`.
             std.debug.assert(num_inner > j);
-            inners = try self.allocator.alloc(num_inner);
+            inners = try self.allocator.alloc(*const Expr, num_inner);
             errdefer self.allocator.free(inners);
             var l: usize = 0;
             for (operands[0..j]) |operand| {
@@ -276,12 +278,12 @@ pub const ExprPool = struct {
             }
         }
         var inners: []*const Expr = undefined;
-        if (num_inner != operands.size) {
+        if (num_inner != operands.len) {
             // Some operand(s) are `.choose` and need to be expanded.
-            std.debug.assert(num_inner > operands.size);
+            std.debug.assert(num_inner > operands.len);
             // XXX It's possible to realloc `operands` to size of `num_inner`
             // here but need to expand backwards that way.
-            inners = try self.allocator.alloc(num_inner);
+            inners = try self.allocator.alloc(*const Expr, num_inner);
             errdefer self.allocator.free(inners);
             var l: usize = 0;
             for (operands) |operand| {
@@ -310,12 +312,14 @@ pub const ExprPool = struct {
             var i: usize = 0;
             var j: usize = inners.len;
             while (i < j) {
-                switch (inners[i]) {
+                switch (inners[i].*) {
                     .epsilon => {
                         // Epsilon is not needed if there is a `zero_or_more`.
                         if (has_repeat) {
                             j -= 1;
                             std.mem.swap(*const Expr, &inners[i], &inners[j]);
+                        } else {
+                            i += 1;
                         }
                     },
                     .one_or_more => |content| {

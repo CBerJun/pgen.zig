@@ -57,8 +57,13 @@ pub fn main(init: std.process.Init) void {
             error.PgenParseError => fatal("parse failed", .{}),
         };
     }
-    var ast = parser.retrieve();
-    defer ast.deinit(gpa);
+    var cst = parser.retrieve();
+    defer cst.deinit(gpa);
+    var ast = pgen.cst2ast.EbnfManaged.fromCst(cst, gpa, gpa) catch |err| switch (err) {
+        error.OutOfMemory => fatal("OOM (CST to AST)", .{}),
+        else => |e| fatal("CST to AST failed: {s}", .{@errorName(e)}),
+    };
+    defer ast.deinit();
 }
 
 fn fatal(comptime format: []const u8, args: anytype) noreturn {

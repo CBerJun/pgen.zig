@@ -164,7 +164,7 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
                         .STRING => {
                             // Register literal token
                             const s = first.payload.str;
-                            if (literal_terminals_map.get(s.suffix)) |map| {
+                            if (literal_terminals_map.getPtr(s.suffix)) |map| {
                                 if (s.content.len == 0)
                                     return SemanticError.EmptyLiteralToken;
                                 _ = try map.getOrPut(scrap_allocator, s.content);
@@ -234,7 +234,7 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
     {
         var it = literal_terminals_map.iterator();
         while (it.next()) |entry| {
-            const collection = literal_collections[literal_terminal_i];
+            const collection = &literal_collections[literal_terminal_i];
             collection.suffix = try allocator.dupe(u8, entry.key_ptr.*);
             errdefer allocator.free(collection.suffix);
             const map = entry.value_ptr.*;
@@ -307,9 +307,9 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
             .entry = entry_nt,
             .count = nonterminal_count,
             .node_forming_count = node_forming_nt_count,
-            .names = node_forming_nt_names,
+            .names = node_forming_nt_names.ptr,
         },
-        .productions = productions,
+        .productions = productions.ptr,
     };
 }
 
@@ -324,7 +324,7 @@ const CstRhsToAst = struct {
     };
 
     pub fn rhs(self: @This(), node: psr.NonterminalExpansion) Error!*const ast.Expr {
-        const n_operands = node.children.len >> 1;
+        const n_operands = (node.children.len + 1) >> 1;
         var operands = try self.pool.allocator.alloc(*const ast.Expr, n_operands);
         var i: usize = 1;
         defer if (i < n_operands) self.pool.allocator.free(operands);
@@ -342,9 +342,9 @@ const CstRhsToAst = struct {
     pub fn rhsFactor(self: @This(), node: psr.NonterminalExpansion) Error!*const ast.Expr {
         var it = node.iteratorOf(.rhs_factor);
         if (it.peek().?.* == .internal) {
-            const n_operands = node.children.len >> 1;
+            const n_operands = node.children.len;
             var operands = try self.pool.allocator.alloc(*const ast.Expr, n_operands);
-            var i: usize = 1;
+            var i: usize = 0;
             defer if (i < n_operands) self.pool.allocator.free(operands);
             while (it.next()) |rhs_term| {
                 operands[i] = try self.rhsTerm(rhs_term.internal);

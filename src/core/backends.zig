@@ -153,12 +153,12 @@ const ZigEmitter = struct {
             \\        allocator.free(self.children);
             \\    }
             \\
-            \\    pub fn iterator(self: *@This()) NtChildrenIterator {
+            \\    pub fn iterator(self: @This()) NtChildrenIterator {
             \\        const slice = self.children;
             \\        return .{ .at = slice.ptr, .end = slice.ptr + slice.len };
             \\    }
             \\
-            \\    pub fn iteratorOf(self: *@This(), nt: Nonterminal) NtChildrenIterator {
+            \\    pub fn iteratorOf(self: @This(), nt: Nonterminal) NtChildrenIterator {
             \\        std.debug.assert(self.nonterminal == nt);
             \\        return self.iterator();
             \\    }
@@ -194,8 +194,8 @@ const ZigEmitter = struct {
             \\};
             \\
             \\pub const NtChildrenIterator = struct {
-            \\    at: *CstNode,
-            \\    end: *CstNode,
+            \\    at: [*]CstNode,
+            \\    end: [*]CstNode,
             \\
             \\    pub fn eatToken(self: *@This()) *Token {
             \\        return &self.eat().leaf;
@@ -213,11 +213,11 @@ const ZigEmitter = struct {
             \\        if (self.done())
             \\            return null;
             \\        defer self.at += 1;
-            \\        return self.at;
+            \\        return &self.at[0];
             \\    }
             \\
             \\    pub fn peek(self: @This()) ?*CstNode {
-            \\        return if (self.done()) null else self.at;
+            \\        return if (self.done()) null else &self.at[0];
             \\    }
             \\
             \\    pub fn toss(self: *@This()) void {
@@ -229,7 +229,7 @@ const ZigEmitter = struct {
             \\        return self.at == self.end;
             \\    }
             \\
-            \\    pub const State = *CstNode;
+            \\    pub const State = [*]CstNode;
             \\    pub fn saveState(self: @This()) State {
             \\        return self.at;
             \\    }
