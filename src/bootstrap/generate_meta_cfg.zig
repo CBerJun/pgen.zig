@@ -85,7 +85,7 @@ inline fn atomList(allocator: std.mem.Allocator, args: anytype) std.mem.Allocato
 }
 
 const ProductionManager = struct {
-    l: std.ArrayListUnmanaged(std.ArrayListUnmanaged([]Atom)),
+    l: std.ArrayList(std.ArrayList([]Atom)),
     allocator: std.mem.Allocator,
     n_prods: u32 = 0,
 

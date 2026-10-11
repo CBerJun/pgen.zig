@@ -126,7 +126,7 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
         std.debug.assert(production_it.done());
         // Pass 1 expression DFS. Just collect possible values for literal
         // tokens.
-        var stack: std.ArrayListUnmanaged(*psr.NonterminalExpansion) = .empty;
+        var stack: std.ArrayList(*psr.NonterminalExpansion) = .empty;
         defer stack.deinit(scrap_allocator);
         try stack.append(scrap_allocator, rhs);
         while (stack.pop()) |nt_expansion| {

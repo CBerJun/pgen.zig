@@ -149,7 +149,7 @@ pub fn firstSet(grammar: cfg.Cfg, nullable: std.DynamicBitSetUnmanaged, allocato
     }
 
     for (0..grammar.nonterminals.count) |u| {
-        var succ: std.ArrayListUnmanaged(u32) = .empty; // Successors of `u` in `graph`
+        var succ: std.ArrayList(u32) = .empty; // Successors of `u` in `graph`
         errdefer succ.deinit(allocator);
 
         for (grammar.productionsOf(@intCast(u))) |rhs| {
@@ -229,7 +229,7 @@ pub fn followSet(grammar: cfg.Cfg, nullable: std.DynamicBitSetUnmanaged, first_s
     }
 
     // Adjacency list of `graph`
-    const adj = try allocator.alloc(std.ArrayListUnmanaged(u32), grammar.nonterminals.count);
+    const adj = try allocator.alloc(std.ArrayList(u32), grammar.nonterminals.count);
     defer allocator.free(adj);
     var j: u32 = 0;
     defer {
@@ -418,7 +418,7 @@ pub fn reachableNtsAfterDot(grammar: cfg.Cfg, tarjan: digraph.TarjanSccResult, f
 /// Mapping from a u32 (either nonterminal id or terminal id) to a list of
 /// core items in that neighbor state. See `lr0`.
 const DfaNeighborMap = struct {
-    mp: std.HashMapUnmanaged(u32, std.ArrayListUnmanaged(Item), std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage),
+    mp: std.HashMapUnmanaged(u32, std.ArrayList(Item), std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage),
 
     pub const empty = @This(){ .mp = .empty };
 
@@ -463,7 +463,7 @@ const DfaNeighborMap = struct {
 ///
 /// Backend must implement the following methods (`self: *Backend` omitted):
 /// ```
-/// fn beginTableGen(grammar: *const cfg.Cfg, states: *const std.ArrayListUnmanaged([]Item), allocator: std.mem.Allocator) E!void
+/// fn beginTableGen(grammar: *const cfg.Cfg, states: *const std.ArrayList([]Item), allocator: std.mem.Allocator) E!void
 /// fn beginState() E!void
 /// fn acceptOnEoi() E!void
 /// fn reduce(production: u32) E!void
@@ -498,7 +498,7 @@ pub fn lr0(grammar: cfg.Cfg, tarjan: digraph.TarjanSccResult, first_reachability
     const arena_allocator = arena.allocator();
 
     // Mapping from state label (0 indexed) to core set
-    var states: std.ArrayListUnmanaged([]Item) = .empty;
+    var states: std.ArrayList([]Item) = .empty;
     defer states.deinit(allocator);
     // Mapping from core set to state label
     var states_map: std.HashMapUnmanaged([]Item, u32, ItemSetHashContext, std.hash_map.default_max_load_percentage) = .empty;

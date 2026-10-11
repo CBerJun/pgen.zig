@@ -243,9 +243,9 @@ const ZigEmitter = struct {
         try self.out.writeAll(
             \\
             \\pub const Parser = struct {
-            \\    state_stack: std.ArrayListUnmanaged(StateSize),
-            \\    node_count_stack: std.ArrayListUnmanaged(NodeCountSize),
-            \\    node_stack: std.ArrayListUnmanaged(CstNode),
+            \\    state_stack: std.ArrayList(StateSize),
+            \\    node_count_stack: std.ArrayList(NodeCountSize),
+            \\    node_stack: std.ArrayList(CstNode),
             \\
             \\    pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
             \\        var x = @This() {.state_stack = .empty, .node_count_stack = .empty, .node_stack = .empty};
@@ -377,7 +377,7 @@ const Lr0ActionRow = union(enum) {
     /// Always reduce using this production
     reduce: u32,
     /// Shift/Accept based on (indexed by) upcoming terminal, or reject.
-    shift: std.ArrayListUnmanaged(struct {
+    shift: std.ArrayList(struct {
         /// Terminal needed to see
         terminal: u32,
         /// New state to transition to, or undefined if `terminal` is End of
@@ -406,7 +406,7 @@ pub const GotoTableEntry = struct {
 /// Handle GOTO using switch statements nested in a switch statement.
 pub const ZigSwitchGotoHandler = struct {
     /// GOTO[state][nonterminal]
-    goto_table: std.ArrayListUnmanaged(std.ArrayListUnmanaged(GotoTableEntry)) = .empty,
+    goto_table: std.ArrayList(std.ArrayList(GotoTableEntry)) = .empty,
 
     pub fn free(self: *@This(), allocator: std.mem.Allocator) void {
         for (self.goto_table.items) |*row| {
@@ -464,11 +464,11 @@ pub const Lr0ZigSwitchBackend = struct {
     emitter: ZigEmitter,
     // Internal fields:
     /// A `states` of `null` means `beginTableGen` has not been called.
-    states: ?*const std.ArrayListUnmanaged([]lr0.Item) = null,
+    states: ?*const std.ArrayList([]lr0.Item) = null,
     allocator: std.mem.Allocator = undefined,
     grammar: *const cfg.Cfg = undefined,
     /// ACTION[state][terminal]
-    action_table: std.ArrayListUnmanaged(Lr0ActionRow) = .empty,
+    action_table: std.ArrayList(Lr0ActionRow) = .empty,
     goto_handler: ZigSwitchGotoHandler = .{},
 
     pub fn free(self: *@This()) void {
@@ -485,7 +485,7 @@ pub const Lr0ZigSwitchBackend = struct {
 
     pub const Error = ConflictError || std.Io.Writer.Error || std.mem.Allocator.Error;
 
-    pub fn beginTableGen(self: *@This(), grammar: *const cfg.Cfg, states: *const std.ArrayListUnmanaged([]lr0.Item), allocator: std.mem.Allocator) Error!void {
+    pub fn beginTableGen(self: *@This(), grammar: *const cfg.Cfg, states: *const std.ArrayList([]lr0.Item), allocator: std.mem.Allocator) Error!void {
         self.states = states;
         self.allocator = allocator;
         self.grammar = grammar;
@@ -607,15 +607,15 @@ pub const ActionRow = std.HashMapUnmanaged(u32, Action, std.hash_map.AutoContext
 // };
 
 /// Emit Zig code to handle any LR-style ACTION table
-/// `std.ArrayListUnmanaged(SlrActionRow)`. A `ConflictResolver` of `void`
-/// means no conflict resolution.
+/// `std.ArrayList(SlrActionRow)`. A `ConflictResolver` of `void` means no
+/// conflict resolution.
 pub fn ZigSwitchActionHandler(comptime ConflictResolver: type) type {
     return struct {
         grammar: *const cfg.Cfg,
         /// Optional conflict resolver
         conflict_resolver: ConflictResolver,
         /// ACTION[state][terminal]
-        action_table: std.ArrayListUnmanaged(ActionRow) = .empty,
+        action_table: std.ArrayList(ActionRow) = .empty,
         // Following are for conflict reporting; they are undefined if no
         // conflict occurred.
         conflicting_action1: Action = undefined,
@@ -787,7 +787,7 @@ pub fn SlrBackend(comptime ActionHandler: type, comptime GotoHandler: type) type
         conflict_report: ReportedConflict(lr0.Item) = undefined,
         // Internal fields:
         /// A `states` of `null` means `beginTableGen` has not been called.
-        states: ?*const std.ArrayListUnmanaged([]lr0.Item) = null,
+        states: ?*const std.ArrayList([]lr0.Item) = null,
         /// How many times `beginState` has been called
         state_counter: u32 = 0,
         allocator: std.mem.Allocator = undefined,
@@ -804,7 +804,7 @@ pub fn SlrBackend(comptime ActionHandler: type, comptime GotoHandler: type) type
 
         pub const Error = ConflictError || std.Io.Writer.Error || std.mem.Allocator.Error;
 
-        pub fn beginTableGen(self: *@This(), grammar: *const cfg.Cfg, states: *const std.ArrayListUnmanaged([]lr0.Item), allocator: std.mem.Allocator) Error!void {
+        pub fn beginTableGen(self: *@This(), grammar: *const cfg.Cfg, states: *const std.ArrayList([]lr0.Item), allocator: std.mem.Allocator) Error!void {
             self.states = states;
             self.allocator = allocator;
             self.grammar = grammar;

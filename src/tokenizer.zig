@@ -16,7 +16,7 @@ pub const Tokenizer = struct {
     /// Keep reading characters into `al` until a character that cannot be a
     /// continue character in an identifier appears. Allocates with
     /// `self.payload_allocator`. Does not modify `self.current_loc`.
-    fn readIdContinue(self: *@This(), al: *std.ArrayListUnmanaged(u8)) (std.mem.Allocator.Error || error{ReadFailed})!void {
+    fn readIdContinue(self: *@This(), al: *std.ArrayList(u8)) (std.mem.Allocator.Error || error{ReadFailed})!void {
         while (true) {
             const ch = self.reader.peekByte() catch |err| switch (err) {
                 error.ReadFailed => |e| return e,
@@ -43,7 +43,7 @@ pub const Tokenizer = struct {
         var allocating_writer: std.Io.Writer.Allocating = .init(self.scrap_allocator);
         defer allocating_writer.deinit();
         const writer = &allocating_writer.writer;
-        var string: std.ArrayListUnmanaged(u8) = .empty;
+        var string: std.ArrayList(u8) = .empty;
         errdefer string.deinit(self.payload_allocator);
         var has_more = true;
         var bytes_consumed: usize = 0;
@@ -101,7 +101,7 @@ pub const Tokenizer = struct {
                 error.ReadFailed => |e| return e,
             };
             if (isIdStart(first)) {
-                var identifier: std.ArrayListUnmanaged(u8) = .empty;
+                var identifier: std.ArrayList(u8) = .empty;
                 errdefer identifier.deinit(self.payload_allocator);
                 try identifier.append(self.payload_allocator, first);
                 try self.readIdContinue(&identifier);
@@ -123,7 +123,7 @@ pub const Tokenizer = struct {
                 if (self.reader.peekByte()) |after_quote| {
                     if (isIdStart(after_quote)) {
                         self.reader.toss(1);
-                        var al: std.ArrayListUnmanaged(u8) = .empty;
+                        var al: std.ArrayList(u8) = .empty;
                         errdefer al.deinit(self.payload_allocator);
                         try al.append(self.payload_allocator, after_quote);
                         try self.readIdContinue(&al);
