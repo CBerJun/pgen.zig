@@ -88,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
                 "        content: []const u8,",
                 "        suffix: []const u8,",
                 "    },",
-                "    none,",
+                "    none: void,",
                 "},",
                 "loc: Loc,",
                 "",
