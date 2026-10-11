@@ -21,10 +21,14 @@ export fn pgenParse(src_ptr: [*]const u8, src_len: usize, out_ptr: *[]const u8) 
     var fixed_reader: std.Io.Reader = .fixed(src);
     const reader = &fixed_reader;
 
+    var aggregator: pgen.diagnostic.Aggregator = .withLogging(gpa);
+    defer aggregator.deinit();
+
     var tokenizer: pgen.Tokenizer = .{
         .reader = reader,
         .payload_allocator = gpa,
         .scrap_allocator = gpa,
+        .diagnostic_aggregator = &aggregator,
     };
     var parser = pgen.psr.Parser.init(gpa) catch |err| switch (err) {
         error.OutOfMemory => {
@@ -35,11 +39,13 @@ export fn pgenParse(src_ptr: [*]const u8, src_len: usize, out_ptr: *[]const u8) 
     defer parser.deinit(gpa);
     while (tokenizer.nextToken() catch |err| switch (err) {
         error.InvalidSyntax => {
-            const loc = tokenizer.current_loc;
-            out = std.fmt.allocPrint(gpa, "tokenize failed near line {}, column {}", .{
-                // 0-indexed to 1-indexed
-                loc.ln + 1, loc.col + 1,
-            }) catch oom();
+            if (aggregator.oom) {
+                out = oom();
+            } else {
+                const ptr: *[]const u8 = &aggregator.diagnostics.items(.message)[0];
+                out = ptr.*;
+                ptr.* = &.{}; // Do not release again.
+            }
             return;
         },
         error.OutOfMemory => {

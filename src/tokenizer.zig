@@ -1,16 +1,19 @@
 //! Tokenizes input grammar file.
 
 const std = @import("std");
+const diagnostic = @import("pgen_core").diagnostic;
 const psr = @import("pgen_meta_parser");
 
 pub const Tokenizer = struct {
     reader: *std.Io.Reader,
     payload_allocator: std.mem.Allocator,
     scrap_allocator: std.mem.Allocator,
+    diagnostic_aggregator: *diagnostic.Aggregator,
     // Internal
     current_loc: psr.Token.Loc = .{ .ln = 0, .col = 0 },
     sent_eoi: bool = false,
 
+    /// Check the `diagnostic_aggregator` for detailed error message for `InvalidSyntax`.
     pub const Error = error{ReadFailed} || std.mem.Allocator.Error || error{InvalidSyntax};
 
     /// Keep reading characters into `al` until a character that cannot be a
@@ -36,6 +39,19 @@ pub const Tokenizer = struct {
         return std.ascii.isAlphabetic(ch) or ch == '_';
     }
 
+    /// Report a fatal error at given `Loc`.
+    fn fatalAt(self: *@This(), loc: psr.Token.Loc, comptime fmt: []const u8, args: anytype) void {
+        self.diagnostic_aggregator.add(.fatal, "at line {} column {}: " ++ fmt, .{
+            // These are 0-indexed
+            loc.ln + 1, loc.col + 1,
+        } ++ args);
+    }
+
+    /// Report a fatal error at current location.
+    fn fatal(self: *@This(), comptime fmt: []const u8, args: anytype) void {
+        self.fatalAt(self.current_loc, fmt, args);
+    }
+
     /// Read quoted string assuming the starting '"' is already consumed.
     /// Does not modify `self.current_loc`. Return the string content (escapes
     /// processed) and number of bytes consumed. The ending '"' is consumed.
@@ -47,11 +63,15 @@ pub const Tokenizer = struct {
         errdefer string.deinit(self.payload_allocator);
         var has_more = true;
         var bytes_consumed: usize = 0;
+        const quote_loc = self.current_loc;
         while (has_more) {
             bytes_consumed += self.reader.streamDelimiter(writer, '"') catch |err| switch (err) {
                 error.WriteFailed => return error.OutOfMemory,
                 error.ReadFailed => |e| return e,
-                error.EndOfStream => return error.InvalidSyntax, // Unclosed '"' (EOF)
+                error.EndOfStream => {
+                    self.fatalAt(quote_loc, "unclosed double quote (end of file reached)", .{});
+                    return error.InvalidSyntax;
+                },
             };
             bytes_consumed += 1;
             self.reader.toss(1); // Skip '"'
@@ -76,11 +96,17 @@ pub const Tokenizer = struct {
                                 i += 1;
                             },
                             '"' => unreachable,
-                            else => return error.InvalidSyntax, // Unrecognized escape
+                            else => |ch| {
+                                self.fatalAt(quote_loc, "invalid escape \\{c} in string", .{ch});
+                                return error.InvalidSyntax;
+                            },
                         }
                     },
                     '"' => unreachable,
-                    '\n' => return error.InvalidSyntax, // Unclosed '"' (newline)
+                    '\n' => {
+                        self.fatalAt(quote_loc, "unclosed double quote (newline reached)", .{});
+                        return error.InvalidSyntax;
+                    },
                     else => {
                         string.appendAssumeCapacity(buf[i]);
                         i += 1;
@@ -154,7 +180,8 @@ pub const Tokenizer = struct {
                 defer self.current_loc.col += 1;
                 return .{ .tag = tag, .payload = .{ .none = {} }, .loc = self.current_loc };
             } else {
-                return error.InvalidSyntax; // Invalid character
+                self.fatal("invalid character {c}", .{first});
+                return error.InvalidSyntax;
             }
         }
     }

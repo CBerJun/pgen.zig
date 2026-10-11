@@ -7,3 +7,4 @@ pub const backends = @import("./backends.zig");
 pub const cfg = @import("./cfg.zig");
 pub const digraph = @import("./digraph.zig");
 pub const lr0 = @import("./lr0.zig");
+pub const diagnostic = @import("./diagnostic.zig");
