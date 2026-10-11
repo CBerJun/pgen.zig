@@ -110,7 +110,7 @@ pub const Tokenizer = struct {
                 defer self.current_loc.col += bytes_consumed;
                 if (psr.Token.literal_map.k.get(identifier.items)) |tag| {
                     identifier.deinit(self.payload_allocator);
-                    return .{ .tag = tag, .payload = .{ .none = void{} }, .loc = self.current_loc };
+                    return .{ .tag = tag, .payload = .none, .loc = self.current_loc };
                 } else {
                     const payload = try identifier.toOwnedSlice(self.payload_allocator);
                     return .{ .tag = .WORD, .payload = .{ .word = payload }, .loc = self.current_loc };
@@ -151,7 +151,7 @@ pub const Tokenizer = struct {
                 }
             } else if (psr.Token.literal_map.@".".get((&first)[0..1])) |tag| {
                 defer self.current_loc.col += 1;
-                return .{ .tag = tag, .payload = .{ .none = void{} }, .loc = self.current_loc };
+                return .{ .tag = tag, .payload = .none, .loc = self.current_loc };
             } else {
                 return error.InvalidSyntax; // Invalid character
             }
@@ -162,7 +162,7 @@ pub const Tokenizer = struct {
         defer self.sent_eoi = true;
         return if (self.sent_eoi) null else psr.Token{
             .tag = .@"$",
-            .payload = .{ .none = void{} },
+            .payload = .none,
             .loc = self.current_loc,
         };
     }

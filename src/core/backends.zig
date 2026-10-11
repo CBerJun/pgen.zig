@@ -373,7 +373,7 @@ const ZigEmitter = struct {
 /// conflict resolution (use hash map from terminal to `SlrAction` instead).
 const Lr0ActionRow = union(enum) {
     /// Always reject
-    reject: void,
+    reject,
     /// Always reduce using this production
     reduce: u32,
     /// Shift/Accept based on (indexed by) upcoming terminal, or reject.
@@ -491,7 +491,7 @@ pub const Lr0ZigSwitchBackend = struct {
         self.grammar = grammar;
     }
     pub fn beginState(self: *@This()) Error!void {
-        try self.action_table.append(self.allocator, .{ .reject = void{} });
+        try self.action_table.append(self.allocator, .reject);
         try self.goto_handler.newState(self.allocator);
     }
     pub fn acceptOnEoi(self: *@This()) Error!void {

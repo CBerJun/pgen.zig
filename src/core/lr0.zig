@@ -322,8 +322,8 @@ pub const Action = union(enum) {
         /// Number of symbols on RHS, i.e. number of states to pop
         num_items: u32,
     },
-    accept: void,
-    reject: void,
+    accept,
+    reject,
 };
 
 /// An LR(0) item -- a production with a dot.
@@ -338,8 +338,7 @@ pub const Item = struct {
     pub const augmented_production = std.math.maxInt(u32);
 
     /// Compare items in arbitrary order to allow item set equality/hashing.
-    pub fn cmp(ctx: void, lhs: @This(), rhs: @This()) bool {
-        ctx;
+    pub fn cmp(_: void, lhs: @This(), rhs: @This()) bool {
         return lhs.production < rhs.production or
             (lhs.production == rhs.production and lhs.dot < rhs.dot);
     }
@@ -450,7 +449,7 @@ const DfaNeighborMap = struct {
     pub fn finalize(self: @This()) void {
         var it = self.mp.valueIterator();
         while (it.next()) |core_items| {
-            std.mem.sortUnstable(Item, core_items.items, void{}, Item.cmp);
+            std.mem.sortUnstable(Item, core_items.items, {}, Item.cmp);
         }
     }
 };

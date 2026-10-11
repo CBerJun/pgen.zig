@@ -24,7 +24,7 @@ pub const Expr = union(enum) {
     zero_or_more: *const Expr,
     one_or_more: *const Expr,
     choose: []*const Expr,
-    epsilon: void,
+    epsilon,
 
     pub fn free(self: *@This(), allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -149,7 +149,7 @@ pub const ExprPool = struct {
     }
 
     pub fn makeEpsilon(self: *@This()) std.mem.Allocator.Error!*const Expr {
-        return self.intern(.{ .epsilon = void{} });
+        return self.intern(.epsilon);
     }
 
     pub fn makeNonterminal(self: *@This(), nt: u32) std.mem.Allocator.Error!*const Expr {
@@ -247,7 +247,7 @@ pub const ExprPool = struct {
             }
             free_operands = false;
         }
-        std.mem.sortUnstable(*const Expr, inners, void{}, ascPtr(Expr));
+        std.mem.sortUnstable(*const Expr, inners, {}, ascPtr(Expr));
         return self.intern(.{ .concat = inners });
     }
 
@@ -333,7 +333,7 @@ pub const ExprPool = struct {
             inners.len = j;
         }
         // Sort and remove duplicate operands
-        std.mem.sortUnstable(*const Expr, inners, void{}, ascPtr(Expr));
+        std.mem.sortUnstable(*const Expr, inners, {}, ascPtr(Expr));
         var last_operand: usize = 0; // address 0 is never mapped
         var write_index: usize = 0;
         var found_gap = false; // In most cases there is no duplicate; const optimization

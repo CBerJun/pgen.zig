@@ -88,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
                 "        content: []const u8,",
                 "        suffix: []const u8,",
                 "    },",
-                "    none: void,",
+                "    none,",
                 "},",
                 "loc: Loc,",
                 "",
@@ -115,7 +115,7 @@ pub fn main(init: std.process.Init) !void {
         .follow_sets = &follow_set,
         .action_handler = .{
             .grammar = &meta_cfg,
-            .conflict_resolver = void{},
+            .conflict_resolver = {},
         },
         .goto_handler = .{},
     };

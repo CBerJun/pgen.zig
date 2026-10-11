@@ -160,7 +160,7 @@ pub const Digraph = struct {
             for (tarjan.membersOf(@intCast(scc_id))) |u| {
                 ans.setUnion(T[u]);
                 for (self.succ[u]) |v| {
-                    try successor_sccs.put(allocator, tarjan.owner[v], void{});
+                    try successor_sccs.put(allocator, tarjan.owner[v], {});
                 }
             }
             var it = successor_sccs.keyIterator();
@@ -185,7 +185,7 @@ pub const Digraph = struct {
             for (tarjan.membersOf(@intCast(scc_id))) |u| {
                 ans.set(u);
                 for (self.succ[u]) |v| {
-                    try successor_sccs.put(allocator, tarjan.owner[v], void{});
+                    try successor_sccs.put(allocator, tarjan.owner[v], {});
                 }
             }
             var it = successor_sccs.keyIterator();
