@@ -145,6 +145,7 @@ pub const Tokenizer = struct {
                 self.current_loc.ln += 1;
                 self.current_loc.col = 0;
             } else if (std.ascii.isWhitespace(first)) {
+                self.current_loc.col += 1;
                 if (first == '\n') {
                     self.current_loc.ln += 1;
                     self.current_loc.col = 0;
