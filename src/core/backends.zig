@@ -257,6 +257,8 @@ const ZigEmitter = struct {
             \\        defer self.* = undefined;
             \\        self.state_stack.deinit(allocator);
             \\        self.node_count_stack.deinit(allocator);
+            \\        // May have partial results on error
+            \\        for (self.node_stack.items) |*node| node.deinit(allocator);
             \\        self.node_stack.deinit(allocator);
             \\    }
             \\
