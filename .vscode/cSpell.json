@@ -19,5 +19,6 @@
         "wyhash",
         "nodeless",
         "subexpression",
+        "deinited",
     ]
 }

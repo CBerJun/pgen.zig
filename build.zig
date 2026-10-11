@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void {
     // --- Config
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const demo = b.option(bool, "enable-demo", "install demo bridge rather than CLI") orelse false;
 
     // --- Compile core for host
     // Interestingly, to bootstrap pgen.zig we need to compile the core twice,
@@ -87,7 +88,10 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(exe);
+    if (!demo) {
+        // CLI does not work on wasm32-freestanding.
+        b.installArtifact(exe);
+    }
 
     // --- Run directly or unit tests
     const run_step = b.step("run", "Run pgenzig CLI");
@@ -115,4 +119,27 @@ pub fn build(b: *std.Build) void {
     // --- Build debug targets
     const run_generate_meta_cfg_step = b.step("gen-meta-cfg", "Generate meta CFG (debug)");
     run_generate_meta_cfg_step.dependOn(&run_generate_meta_cfg.step);
+
+    // --- Web playground/demo
+    // You must target wasm32-freestanding.
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+    const demo_bridge = b.addExecutable(.{
+        .name = "pgen-bridge",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("demo/bridge.zig"),
+            .target = wasm_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pgen", .module = mod },
+            },
+        }),
+    });
+    demo_bridge.entry = .disabled;
+    demo_bridge.rdynamic = true;
+    if (demo) {
+        b.installArtifact(demo_bridge);
+    }
 }

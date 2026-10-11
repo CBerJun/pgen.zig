@@ -1,3 +1,5 @@
 # Build artifacts
 /.zig-cache/
 /zig-out/
+/demo/build/
+/demo/dist/

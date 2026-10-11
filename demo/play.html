@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <title>pgen.zig Demo</title>
+    <script src="pgen-demo.js"></script>
+    <link rel="stylesheet" href="play-styles.css">
+</head>
+
+<body>
+    <h1>pgen.zig Demo</h1>
+    <p>Sample grammar:</p>
+    <pre>
+tokens {
+    "";  # Each instance of a quoted string automatically becomes one unique token
+    number;  # A custom token
+}
+entry expression;  # Entry symbol
+
+expression: term (("+" | "-") term)*;  # An expression is a term, possibly added/subtracted by other terms
+term: factor (("*" | "/") factor)*;  # A term is a factor, possibly multiplied/divided by other factors
+factor:
+    number  # Most basic unit: number (a token)
+    | "(" expression ")"  # An expression in parentheses is a single factor
+    | "sin" "(" expression ")"  # We can add sin() function too
+    | "sin" number  # We can allow omitting parentheses when a number follows too
+    ;
+    </pre>
+    <p>Try to mess around with the grammar and see how the program detects a problem in the grammar (e.g. undeclared name). Of course, in the near future the parser generator will be complete and it will be able to start generating parsers for your custom grammar!</p>
+    <div id="app">
+        <p>Input grammar:</p>
+        <textarea id="input-source"></textarea>
+        <p>Output:</p>
+        <pre id="output-message">Grammar check result will be displayed here.</pre>
+        <p>In the future, this will be replaced by a custom input box and a visualization of the generated parse tree.</p>
+    </div>
+</body>
+
+</html>

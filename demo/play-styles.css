@@ -1,0 +1,10 @@
+#app {
+    display: flex;
+    flex-direction: column;
+    height: 70vh;
+}
+
+#input-source {
+    flex-grow: 1;
+    width: 100%;
+}
