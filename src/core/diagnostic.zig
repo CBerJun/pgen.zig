@@ -63,6 +63,7 @@ pub const Aggregator = struct {
                 .level = level,
                 .message = message,
             }) catch {
+                allocator.free(message);
                 self.oom = true;
             };
         }
