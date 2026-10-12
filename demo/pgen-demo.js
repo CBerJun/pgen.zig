@@ -18,7 +18,6 @@ function backendParse(input) {
         releaseMessage, newBuffer, freeBuffer,
         messagePtr, messageLen, invalidPtr,
     } = wasmExports;
-    console.log(wasmExports);
     const nullPtr = invalidPtr();
     const inLen = input.length;
     const inBuffer = newBuffer(inLen);
