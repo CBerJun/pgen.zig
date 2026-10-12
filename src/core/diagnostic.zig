@@ -68,4 +68,17 @@ pub const Aggregator = struct {
             };
         }
     }
+
+    /// Print all the diagnostics in human-readable form.
+    pub fn printDiagnostics(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        for (self.diagnostics.items(.level), self.diagnostics.items(.message)) |level, message| {
+            try writer.writeAll(@tagName(level));
+            try writer.writeAll(": ");
+            try writer.writeAll(message);
+            try writer.writeByte('\n');
+        }
+        if (self.oom) {
+            try writer.writeAll("some logs were omitted due to out-of-memory!");
+        }
+    }
 };

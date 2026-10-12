@@ -3,6 +3,7 @@ const psr = @import("pgen_meta_parser");
 const pgen_core = @import("pgen_core");
 const ast = pgen_core.ast;
 const cfg = pgen_core.cfg;
+const diagnostic = pgen_core.diagnostic;
 
 /// Managed `ast.Ebnf` with an arena allocator and `ExprPool` which holds
 /// the rhs EBNF nodes. This won't work if you have multiple `ast.Ebnf`s
@@ -16,13 +17,13 @@ pub const EbnfManaged = struct {
     /// The pool from which all `Expr`s in `productions` are interned.
     pool: ast.ExprPool,
 
-    pub fn fromCst(cst: psr.CstNode, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) (SemanticError || std.mem.Allocator.Error)!@This() {
+    pub fn fromCst(cst: psr.CstNode, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator, aggregator: *diagnostic.Aggregator) (SemanticError || std.mem.Allocator.Error)!@This() {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         errdefer arena.deinit();
         const arena_allocator = arena.allocator();
         var pool: ast.ExprPool = .init(arena_allocator);
         return .{
-            .ebnf = try cstToEbnf(cst, &pool, arena_allocator, scrap_allocator),
+            .ebnf = try cstToEbnf(cst, &pool, arena_allocator, scrap_allocator, aggregator),
             .arena = arena,
             .pool = pool,
         };
@@ -36,14 +37,7 @@ pub const EbnfManaged = struct {
 };
 
 pub const SemanticError = error{
-    DuplicateTokenDecl,
-    NonemptyStringInTokenDecl,
-    DuplicateLiteralSuffixDecl,
-    DuplicateNtDecl,
-    NtNameShadowsToken,
-    UndeclaredIdentifier,
-    UndeclaredLiteralSuffix,
-    EmptyLiteralToken,
+    Cst2AstSemanticError,
 };
 
 /// Convert grammar CST to intermediate EBNF form, allocating memory for
@@ -53,7 +47,7 @@ pub const SemanticError = error{
 /// the same lifespan; just remember to deinit arena on error. Do not pass in
 /// an arena for `scrap_allocator`. On error, it is not possible to remove
 /// already-interned expressions in `pool`.
-pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) (SemanticError || std.mem.Allocator.Error)!ast.Ebnf {
+pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator, aggregator: *diagnostic.Aggregator) (SemanticError || std.mem.Allocator.Error)!ast.Ebnf {
     // Pass 1: Label terminals and nonterminals with integers
     var named_terminals_map: std.StringHashMapUnmanaged(u32) = .empty;
     defer named_terminals_map.deinit(scrap_allocator); // Strings are borrowed
@@ -76,17 +70,34 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
         std.debug.assert(token_decl_it.done());
         switch (word_or_str.tag) {
             .WORD => {
-                const gop = try named_terminals_map.getOrPut(scrap_allocator, word_or_str.payload.word);
-                if (gop.found_existing)
-                    return SemanticError.DuplicateTokenDecl;
+                const id = word_or_str.payload.word;
+                const gop = try named_terminals_map.getOrPut(scrap_allocator, id);
+                if (gop.found_existing) {
+                    return fatalAt(
+                        aggregator,
+                        word_or_str,
+                        "duplicate declaration of named token '{s}'",
+                        .{id},
+                    );
+                }
             },
             .STRING => {
                 const s = word_or_str.payload.str;
                 if (s.content.len > 0)
-                    return SemanticError.NonemptyStringInTokenDecl;
+                    return fatalAt(
+                        aggregator,
+                        word_or_str,
+                        "literal token definition string must be empty (like this: \"\"{s})",
+                        .{s.suffix},
+                    );
                 const gop = try literal_terminals_map.getOrPut(scrap_allocator, s.suffix);
                 if (gop.found_existing)
-                    return SemanticError.DuplicateLiteralSuffixDecl;
+                    return fatalAt(
+                        aggregator,
+                        word_or_str,
+                        "duplicate declaration of literal token suffix \"\"{s}",
+                        .{s.suffix},
+                    );
                 gop.value_ptr.* = .empty;
             },
             else => unreachable,
@@ -113,10 +124,20 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
         nt_token.assertTag(.WORD);
         const nt_string = nt_token.payload.word;
         if (named_terminals_map.contains(nt_string))
-            return SemanticError.NtNameShadowsToken;
+            return fatalAt(
+                aggregator,
+                nt_token,
+                "nonterminal name '{s}' shadows the named terminal with the same name",
+                .{nt_string},
+            );
         const gop = try nonterminals_map.getOrPut(scrap_allocator, nt_string);
         if (gop.found_existing)
-            return SemanticError.DuplicateNtDecl;
+            return fatalAt(
+                aggregator,
+                nt_token,
+                "duplicate definition of nonterminal '{s}'",
+                .{nt_string},
+            );
         // Temporarily store `nodeless` as hashmap value
         gop.value_ptr.* = @intFromBool(nodeless);
         node_forming_nt_count += @intFromBool(!nodeless);
@@ -166,10 +187,20 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
                             const s = first.payload.str;
                             if (literal_terminals_map.getPtr(s.suffix)) |map| {
                                 if (s.content.len == 0)
-                                    return SemanticError.EmptyLiteralToken;
+                                    return fatalAt(
+                                        aggregator,
+                                        first,
+                                        "literal token value may not be empty",
+                                        .{},
+                                    );
                                 _ = try map.getOrPut(scrap_allocator, s.content);
                             } else {
-                                return SemanticError.UndeclaredLiteralSuffix;
+                                return fatalAt(
+                                    aggregator,
+                                    first,
+                                    "undeclared literal token suffix (add '\"\"{s};' to 'tokens' section)",
+                                    .{s.suffix},
+                                );
                             }
                         },
                         .@".(" => {
@@ -190,7 +221,14 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
     }
     const nonterminal_count = nonterminals_map.size;
     // Resolve entry
-    const entry_nt = nonterminals_map.get(entry_nt_string) orelse return SemanticError.UndeclaredIdentifier;
+    const entry_nt = nonterminals_map.get(entry_nt_string) orelse {
+        return fatalAt(
+            aggregator,
+            entry_token,
+            "specified entry nonterminal '{s}' is undefined",
+            .{entry_nt_string},
+        );
+    };
     // Label nonterminals
     var node_forming_nt_names = try allocator.alloc([]u8, node_forming_nt_count);
     // Fill with empty slice to allow errdefer to clean up.
@@ -282,6 +320,7 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
         .literal_terminals_map = &literal_terminals_map,
         .nonterminals_map = &nonterminals_map,
         .pool = pool,
+        .aggregator = aggregator,
     };
     while (grammar_it.next()) |production_node| {
         var production_it = production_node.internal.iteratorOf(.production);
@@ -313,15 +352,28 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
     };
 }
 
+/// Convenience function for `cstToEbnf`.
+fn fatal(aggregator: *diagnostic.Aggregator, comptime fmt: []const u8, args: anytype) SemanticError {
+    aggregator.add(.fatal, fmt, args);
+    return SemanticError.Cst2AstSemanticError;
+}
+
+/// Convenience function for `cstToEbnf`.
+fn fatalAt(aggregator: *diagnostic.Aggregator, token: *const psr.Token, comptime fmt: []const u8, args: anytype) SemanticError {
+    return fatal(aggregator, "at line {} column {}: " ++ fmt, .{
+        // 0-indexed to 1-indexed
+        token.loc.ln + 1, token.loc.col + 1,
+    } ++ args);
+}
+
 const CstRhsToAst = struct {
     named_terminals_map: *const std.StringHashMapUnmanaged(u32),
     literal_terminals_map: *const std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(u32)),
     nonterminals_map: *const std.StringHashMapUnmanaged(u32),
     pool: *ast.ExprPool,
+    aggregator: *diagnostic.Aggregator,
 
-    pub const Error = std.mem.Allocator.Error || error{
-        UndeclaredIdentifier,
-    };
+    pub const Error = std.mem.Allocator.Error || SemanticError;
 
     pub fn rhs(self: @This(), node: psr.NonterminalExpansion) Error!*const ast.Expr {
         const n_operands = (node.children.len + 1) >> 1;
@@ -386,7 +438,12 @@ const CstRhsToAst = struct {
                     return self.pool.makeTerminal(tid);
                 } else {
                     // We did not check for this in 1st Pass.
-                    return Error.UndeclaredIdentifier;
+                    return fatalAt(
+                        self.aggregator,
+                        first,
+                        "undefined identifier '{s}'",
+                        .{word},
+                    );
                 }
             },
             .STRING => {

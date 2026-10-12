@@ -3,26 +3,74 @@ const pgen = @import("pgen");
 
 const gpa = std.heap.wasm_allocator;
 
-const oom_instance = "Out of memory";
-const ok_instance = "OK (no error)";
+const ErrorReport = struct {
+    allocating_writer: std.Io.Writer.Allocating,
+    oom: bool,
+    failed: bool,
 
-fn oom() []const u8 {
-    return oom_instance;
-}
-fn ok() []const u8 {
-    return ok_instance;
-}
+    pub const oom_instance = "Out of memory while printing error";
+    pub const ok_instance = "OK (no error)";
+
+    pub fn init() @This() {
+        return .{
+            .allocating_writer = .init(gpa),
+            .oom = false,
+            .failed = false,
+        };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.allocating_writer.deinit();
+        self.* = undefined;
+    }
+
+    pub fn writer(self: *@This()) *std.Io.Writer {
+        return &self.allocating_writer.writer;
+    }
+
+    pub fn addError(self: *@This(), comptime fmt: []const u8, args: anytype) void {
+        self.failed = true;
+        if (self.oom)
+            return;
+        self.writer().print(fmt, args) catch {
+            // The reason an allocating writer fails is OOM
+            self.oom = true;
+        };
+    }
+
+    pub fn dumpAggregator(self: *@This(), aggregator: *pgen.diagnostic.Aggregator) void {
+        if (aggregator.fatal)
+            self.failed = true;
+        if (self.oom)
+            return;
+        aggregator.printDiagnostics(self.writer()) catch {
+            self.oom = true;
+        };
+    }
+
+    pub fn getResult(self: *@This()) []const u8 {
+        if (self.oom)
+            return oom_instance;
+        if (!self.failed)
+            return ok_instance;
+        return self.allocating_writer.toOwnedSlice() catch oom_instance;
+    }
+};
 
 // Returned buffer must be deinited with `pgenReleaseMessage`.
 export fn pgenParse(src_ptr: [*]const u8, src_len: usize, out_ptr: *[]const u8) void {
     const src: []const u8 = src_ptr[0..src_len];
-    var out: []const u8 = undefined;
-    defer out_ptr.* = out;
     var fixed_reader: std.Io.Reader = .fixed(src);
     const reader = &fixed_reader;
 
     var aggregator: pgen.diagnostic.Aggregator = .withLogging(gpa);
     defer aggregator.deinit();
+    var report: ErrorReport = .init();
+    defer {
+        report.dumpAggregator(&aggregator);
+        out_ptr.* = report.getResult();
+        report.deinit();
+    }
 
     var tokenizer: pgen.Tokenizer = .{
         .reader = reader,
@@ -32,61 +80,54 @@ export fn pgenParse(src_ptr: [*]const u8, src_len: usize, out_ptr: *[]const u8) 
     };
     var parser = pgen.psr.Parser.init(gpa) catch |err| switch (err) {
         error.OutOfMemory => {
-            out = oom();
+            report.addError("OOM (tokenizer)\n", .{});
             return;
         },
     };
     defer parser.deinit(gpa);
     while (tokenizer.nextToken() catch |err| switch (err) {
         error.InvalidSyntax => {
-            if (aggregator.oom) {
-                out = oom();
-            } else {
-                const ptr: *[]const u8 = &aggregator.diagnostics.items(.message)[0];
-                out = ptr.*;
-                ptr.* = &.{}; // Do not release again.
-            }
+            // Details logged by aggregator.
             return;
         },
         error.OutOfMemory => {
-            out = oom();
+            report.addError("OOM (nextToken)\n", .{});
             return;
         },
         error.ReadFailed => unreachable,
     }) |token| {
         parser.feed(gpa, token) catch |err| switch (err) {
             error.OutOfMemory => {
-                out = oom();
+                report.addError("OOM (parser)\n", .{});
                 return;
             },
             error.PgenParseError => {
                 const loc = tokenizer.current_loc;
-                out = std.fmt.allocPrint(gpa, "parse failed near line {}, column {}", .{
+                report.addError("parse failed near line {}, column {}", .{
                     // 0-indexed to 1-indexed
                     loc.ln + 1, loc.col + 1,
-                }) catch oom();
+                });
                 return;
             },
         };
     }
     var cst = parser.retrieve();
     defer cst.deinit(gpa);
-    var ast = pgen.cst2ast.EbnfManaged.fromCst(cst, gpa, gpa) catch |err| switch (err) {
+    var ast = pgen.cst2ast.EbnfManaged.fromCst(cst, gpa, gpa, &aggregator) catch |err| switch (err) {
         error.OutOfMemory => {
-            out = oom();
+            report.addError("OOM (CST to AST)\n", .{});
             return;
         },
-        else => |e| {
-            out = std.fmt.allocPrint(gpa, "CST to AST failed: {s}", .{@errorName(e)}) catch oom();
+        error.Cst2AstSemanticError => {
+            // Details logged by aggregator.
             return;
         },
     };
     defer ast.deinit();
-    out = ok();
 }
 
 export fn releaseMessage(buf: *const []const u8) void {
-    if (buf.ptr == oom_instance or buf.ptr == ok_instance) {
+    if (buf.ptr == ErrorReport.oom_instance or buf.ptr == ErrorReport.ok_instance) {
         return;
     }
     gpa.free(buf.*);
@@ -115,5 +156,5 @@ export fn messageLen(msg: *const []const u8) usize {
 }
 
 export fn invalidPtr() *anyopaque {
-    return @constCast(oom_instance[0..].ptr);
+    return @constCast(&gpa);
 }

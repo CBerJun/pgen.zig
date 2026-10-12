@@ -11,7 +11,7 @@ const Logger = struct {
     stderr: std.Io.File,
     allocator: std.mem.Allocator,
     buffer: []u8,
-    writer: std.Io.File.Writer,
+    file_writer: std.Io.File.Writer,
 
     pub fn init(init_: std.process.Init, allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
         const buffer = try allocator.alloc(u8, BUFFER_SIZE);
@@ -21,18 +21,22 @@ const Logger = struct {
             .stderr = stderr,
             .allocator = allocator,
             .buffer = buffer,
-            .writer = stderr.writer(init_.io, buffer),
+            .file_writer = stderr.writer(init_.io, buffer),
         };
     }
 
-    fn w(_: @This(), err_union: std.Io.Writer.Error!void) void {
+    pub fn writer(self: *@This()) *std.Io.Writer {
+        return &self.file_writer.interface;
+    }
+
+    pub fn check(_: @This(), err_union: std.Io.Writer.Error!void) void {
         err_union catch {
             std.debug.print("writing to stderr failed\n", .{});
         };
     }
 
     pub fn deinit(self: *@This()) void {
-        self.writer.flush() catch |err| {
+        self.file_writer.flush() catch |err| {
             std.debug.print("write to stderr failed ({s})", .{@errorName(err)});
         };
         self.allocator.free(self.buffer);
@@ -40,17 +44,17 @@ const Logger = struct {
     }
 
     pub fn printLine(self: *@This(), comptime fmt: []const u8, args: anytype) void {
-        self.w(self.writer.interface.print(fmt, args));
-        self.w(self.writer.interface.writeByte('\n'));
+        self.check(self.writer().print(fmt, args));
+        self.check(self.writer().writeByte('\n'));
     }
 
     pub fn write(self: *@This(), str: []const u8) void {
-        self.w(self.writer.interface.writeAll(str));
+        self.check(self.writer().writeAll(str));
     }
 
     pub fn writeLine(self: *@This(), str: []const u8) void {
-        self.w(self.writer.interface.writeAll(str));
-        self.w(self.writer.interface.writeByte('\n'));
+        self.check(self.writer().writeAll(str));
+        self.check(self.writer().writeByte('\n'));
     }
 };
 
@@ -102,6 +106,9 @@ pub fn main(init: std.process.Init) u8 {
     // Prepare diagnostic aggregator
     var aggregator: pgen.diagnostic.Aggregator = .withLogging(gpa);
     defer aggregator.deinit();
+    defer aggregator.printDiagnostics(logger.writer()) catch |err| {
+        logger.check(err);
+    };
 
     // Tokenize and parse it
     var tokenizer: pgen.Tokenizer = .{
@@ -119,12 +126,7 @@ pub fn main(init: std.process.Init) u8 {
     defer parser.deinit(gpa);
     while (tokenizer.nextToken() catch |err| {
         switch (err) {
-            error.InvalidSyntax => {
-                logger.writeLine("tokenize failed");
-                if (!aggregator.oom) {
-                    logger.writeLine(aggregator.diagnostics.items(.message)[0]);
-                }
-            },
+            error.InvalidSyntax => logger.writeLine("tokenize failed"), // Details logged by aggregator
             error.OutOfMemory => logger.writeLine("OOM (in file tokenization)"),
             error.ReadFailed => logger.writeLine("in file read failed"),
         }
@@ -141,10 +143,10 @@ pub fn main(init: std.process.Init) u8 {
     }
     var cst = parser.retrieve();
     defer cst.deinit(gpa);
-    var ast = pgen.cst2ast.EbnfManaged.fromCst(cst, gpa, gpa) catch |err| {
+    var ast = pgen.cst2ast.EbnfManaged.fromCst(cst, gpa, gpa, &aggregator) catch |err| {
         switch (err) {
             error.OutOfMemory => logger.writeLine("OOM (CST to AST)"),
-            else => |e| logger.printLine("CST to AST failed: {s}", .{@errorName(e)}),
+            error.Cst2AstSemanticError => logger.writeLine("CST to AST failed"), // Details logged by aggregator
         }
         return 1;
     };
