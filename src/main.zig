@@ -133,6 +133,7 @@ pub fn main(init: std.process.Init) u8 {
         return 1;
     }) |token| {
         parser.feed(gpa, token) catch |err| {
+            token.deinit(gpa);
             switch (err) {
                 error.OutOfMemory => logger.writeLine("OOM (in file parsing)"),
                 // TODO: diagnostic
@@ -140,6 +141,11 @@ pub fn main(init: std.process.Init) u8 {
             }
             return 1;
         };
+        if (token.tag == .@"$") {
+            // The EOI token does not end up in the CST and needs to be freed
+            // separately.
+            token.deinit(gpa);
+        }
     }
     var cst = parser.retrieve();
     defer cst.deinit(gpa);

@@ -168,6 +168,16 @@ const ZigEmitter = struct {
             \\    leaf: Token,
             \\    internal: NonterminalExpansion,
             \\
+            \\    /// Recursively deinit this subtree.
+            \\
+        );
+        if (self.cst_owns_token) {
+            try self.out.writeAll(
+                \\    /// Tokens owned by the subtree are also deinited.
+                \\
+            );
+        }
+        try self.out.writeAll(
             \\    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
             \\        defer self.* = undefined;
             \\        switch (self.*) {
@@ -264,14 +274,18 @@ const ZigEmitter = struct {
             \\
             \\    pub const Error = error{PgenParseError};
             \\
-            \\    /// Call after sending the last token (which must be EOI) to get the parse tree
+            \\    /// Call after sending the last token (which must be EOI) to get the parse tree.
+            \\    /// Caller owns the result.
             \\    pub fn retrieve(self: *@This()) CstNode {
             \\        return self.node_stack.pop().?;
             \\    }
             \\
             \\    fn shift(self: *@This(), allocator: std.mem.Allocator, token: Token, new_state: StateSize) std.mem.Allocator.Error!void {
+            \\        // This must atomic so that on error we don't keep `token`'s ownership.
             \\        try self.state_stack.append(allocator, new_state);
+            \\        errdefer _ = self.state_stack.pop();
             \\        try self.node_stack.append(allocator, .{.leaf = token});
+            \\        errdefer _ = self.node_stack.pop();
             \\        try self.node_count_stack.append(allocator, 1);
             \\    }
             \\
@@ -349,8 +363,20 @@ const ZigEmitter = struct {
     }
 
     pub fn implementFeed(self: @This()) std.Io.Writer.Error!void {
+        try self.out.writeByte('\n');
         try self.out.writeAll(
+            \\    /// Feed a token to the parser.
             \\
+        );
+        if (self.cst_owns_token) {
+            try self.out.writeAll(
+                \\    /// `token`'s ownership is transferred to the temporary CST nodes owned
+                \\    /// by this parser, unless an error occurs, *or* it's the terminating
+                \\    /// token (of tag `.@"$"`) (which does not end up in the CST at all).
+                \\
+            );
+        }
+        try self.out.writeAll(
             \\    pub fn feed(self: *@This(), allocator: std.mem.Allocator, token: Token) (Error || std.mem.Allocator.Error)!void {
             \\
         );

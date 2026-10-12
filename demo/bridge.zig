@@ -96,20 +96,28 @@ export fn pgenParse(src_ptr: [*]const u8, src_len: usize, out_ptr: *[]const u8) 
         },
         error.ReadFailed => unreachable,
     }) |token| {
-        parser.feed(gpa, token) catch |err| switch (err) {
-            error.OutOfMemory => {
-                report.addError("OOM (parser)\n", .{});
-                return;
-            },
-            error.PgenParseError => {
-                const loc = tokenizer.current_loc;
-                report.addError("parse failed near line {}, column {}", .{
-                    // 0-indexed to 1-indexed
-                    loc.ln + 1, loc.col + 1,
-                });
-                return;
-            },
+        parser.feed(gpa, token) catch |err| {
+            token.deinit(gpa);
+            switch (err) {
+                error.OutOfMemory => {
+                    report.addError("OOM (parser)\n", .{});
+                    return;
+                },
+                error.PgenParseError => {
+                    const loc = tokenizer.current_loc;
+                    report.addError("parse failed near line {}, column {}", .{
+                        // 0-indexed to 1-indexed
+                        loc.ln + 1, loc.col + 1,
+                    });
+                    return;
+                },
+            }
         };
+        if (token.tag == .@"$") {
+            // The EOI token does not end up in the CST and needs to be freed
+            // separately.
+            token.deinit(gpa);
+        }
     }
     var cst = parser.retrieve();
     defer cst.deinit(gpa);
