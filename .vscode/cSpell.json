@@ -20,5 +20,9 @@
         "nodeless",
         "subexpression",
         "deinited",
+        "wasi",
+        "pgenzig",
+        "rdynamic",
+        "Backus-Naur",
     ]
 }
