@@ -1,6 +1,6 @@
 # pgen.zig
 
-**Highly work-in-progress**: This repo is under development that it is not ready for use, even as a minimal parser generator.
+**Work-in-progress**: This repo is in early stage of development. It currently supports only LR(0) and SLR.
 
 This is an [LR parser generator](https://en.wikipedia.org/wiki/Compiler-compiler) for Zig.
 

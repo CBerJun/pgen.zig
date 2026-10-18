@@ -4,18 +4,6 @@ const pgen_core = @import("pgen_core");
 const Cfg = pgen_core.cfg.Cfg;
 const meta_cfg: Cfg = @import("pgen_meta_cfg").meta_cfg;
 
-fn displayDpSets(cfg: Cfg, sets: pgen_core.lr0.DpBasedSets) !void {
-    for (0..cfg.nonterminals.count) |i| {
-        std.debug.print("{}:", .{i});
-        for (0..cfg.terminals.count) |j| {
-            if (sets.get(@intCast(i)).isSet(j)) {
-                std.debug.print(" {}", .{j});
-            }
-        }
-        std.debug.print("\n", .{});
-    }
-}
-
 pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
@@ -28,43 +16,12 @@ pub fn main(init: std.process.Init) !void {
     const file = try std.Io.Dir.cwd().createFile(init.io, out_file_name, .{});
     defer file.close(init.io);
 
-    const g = try pgen_core.lr0.firstGraph(meta_cfg, allocator);
-    defer g.free(allocator);
+    var ds: pgen_core.lr0.DataStructures = .{ .allocator = allocator, .grammar = meta_cfg };
+    defer ds.deinit();
 
-    const tarjan = try g.tarjanScc(allocator);
-    defer tarjan.free(allocator);
-    const reachability = try g.reachability(tarjan, allocator);
-    defer reachability.free(allocator);
-    for (0..g.n) |j| {
-        const bs = reachability.get(@intCast(j), tarjan);
-        for (0..g.n) |i| {
-            std.debug.print("{}", .{@as(u16, @intFromBool(bs.isSet(i)))});
-        }
-        std.debug.print("\n", .{});
-    }
-
-    const def_use = try pgen_core.lr0.DefUse.fromCfg(meta_cfg, allocator);
-    defer def_use.free(allocator);
-    var nullable = try pgen_core.lr0.nullableAnalysis(meta_cfg, def_use, allocator);
-    defer nullable.deinit(allocator);
-
-    std.debug.print("nullable: ", .{});
-    for (0..meta_cfg.nonterminals.count) |i| {
-        std.debug.print("{}", .{@as(u16, @intFromBool(nullable.isSet(i)))});
-    }
-    std.debug.print("\n", .{});
-
-    const first_set = try pgen_core.lr0.firstSet(meta_cfg, nullable, allocator);
-    defer first_set.free(allocator);
-
-    std.debug.print("first:\n", .{});
-    try displayDpSets(meta_cfg, first_set);
-
-    const follow_set = try pgen_core.lr0.followSet(meta_cfg, nullable, first_set, allocator);
-    defer follow_set.free(allocator);
-
-    std.debug.print("follow:\n", .{});
-    try displayDpSets(meta_cfg, follow_set);
+    const follow_set = try ds.getFollowSet();
+    const tarjan = try ds.getFirstTarjan();
+    const reachability = try ds.getFirstReachability();
 
     var out_buffer: [512]u8 = undefined;
     var out_writer = file.writer(init.io, &out_buffer);

@@ -4,3 +4,6 @@ pub const diagnostic = core.diagnostic;
 pub const psr = @import("pgen_meta_parser");
 pub const Tokenizer = @import("./tokenizer.zig").Tokenizer;
 pub const cst2ast = @import("./cst2ast.zig");
+pub const ast2cfg = core.ast2cfg;
+pub const backends = core.backends;
+pub const lr0 = core.lr0;

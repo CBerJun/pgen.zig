@@ -622,3 +622,83 @@ pub fn lr0(grammar: cfg.Cfg, tarjan: digraph.TarjanSccResult, first_reachability
 
     try backend.endTableGen();
 }
+
+/// Convenient data structure manager.
+pub const DataStructures = struct {
+    allocator: std.mem.Allocator,
+    grammar: cfg.Cfg,
+
+    first_graph: ?digraph.Digraph = null,
+    first_tarjan: ?digraph.TarjanSccResult = null,
+    first_reachability: ?digraph.ReachDpResult = null,
+    def_use: ?DefUse = null,
+    nullable: ?std.DynamicBitSetUnmanaged = null,
+    first_set: ?DpBasedSets = null,
+    follow_set: ?DpBasedSets = null,
+
+    pub fn deinit(self: *@This()) void {
+        if (self.first_graph) |g| g.free(self.allocator);
+        if (self.first_tarjan) |t| t.free(self.allocator);
+        if (self.first_reachability) |r| r.free(self.allocator);
+        if (self.def_use) |d| d.free(self.allocator);
+        if (self.nullable) |*n| n.deinit(self.allocator);
+        if (self.first_set) |f| f.free(self.allocator);
+        if (self.follow_set) |f| f.free(self.allocator);
+    }
+
+    pub fn getFirstGraph(self: *@This()) std.mem.Allocator.Error!digraph.Digraph {
+        if (self.first_graph) |f|
+            return f;
+        const f = try firstGraph(self.grammar, self.allocator);
+        self.first_graph = f;
+        return f;
+    }
+
+    pub fn getFirstTarjan(self: *@This()) std.mem.Allocator.Error!digraph.TarjanSccResult {
+        if (self.first_tarjan) |t|
+            return t;
+        const t = try (try self.getFirstGraph()).tarjanScc(self.allocator);
+        self.first_tarjan = t;
+        return t;
+    }
+
+    pub fn getFirstReachability(self: *@This()) std.mem.Allocator.Error!digraph.ReachDpResult {
+        if (self.first_reachability) |r|
+            return r;
+        const r = try (try self.getFirstGraph()).reachability(try self.getFirstTarjan(), self.allocator);
+        self.first_reachability = r;
+        return r;
+    }
+
+    pub fn getDefUse(self: *@This()) std.mem.Allocator.Error!DefUse {
+        if (self.def_use) |du|
+            return du;
+        const du = try DefUse.fromCfg(self.grammar, self.allocator);
+        self.def_use = du;
+        return du;
+    }
+
+    pub fn getNullable(self: *@This()) std.mem.Allocator.Error!std.DynamicBitSetUnmanaged {
+        if (self.nullable) |n|
+            return n;
+        const n = try nullableAnalysis(self.grammar, try self.getDefUse(), self.allocator);
+        self.nullable = n;
+        return n;
+    }
+
+    pub fn getFirstSet(self: *@This()) std.mem.Allocator.Error!DpBasedSets {
+        if (self.first_set) |fs|
+            return fs;
+        const fs = try firstSet(self.grammar, try self.getNullable(), self.allocator);
+        self.first_set = fs;
+        return fs;
+    }
+
+    pub fn getFollowSet(self: *@This()) std.mem.Allocator.Error!DpBasedSets {
+        if (self.follow_set) |fs|
+            return fs;
+        const fs = try followSet(self.grammar, try self.getNullable(), try self.getFirstSet(), self.allocator);
+        self.follow_set = fs;
+        return fs;
+    }
+};

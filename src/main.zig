@@ -95,6 +95,16 @@ pub fn main(init: std.process.Init) u8 {
         logger.printLine("failed to open in file: {s}", .{@errorName(err)});
         return 1;
     };
+    defer in_file.close(init.io);
+    const out_file_path = arg_it.next() orelse {
+        logger.writeLine("expected output path");
+        return 1;
+    };
+    const out_file = std.Io.Dir.cwd().createFile(init.io, out_file_path, .{}) catch |err| {
+        logger.printLine("failed to open out file: {s}", .{@errorName(err)});
+        return 1;
+    };
+    defer out_file.close(init.io);
     const read_buffer = gpa.alloc(u8, BUFFER_SIZE) catch {
         logger.writeLine("OOM (read buffer)");
         return 1;
@@ -102,6 +112,13 @@ pub fn main(init: std.process.Init) u8 {
     defer gpa.free(read_buffer);
     var in_file_reader = in_file.reader(init.io, read_buffer);
     const reader = &in_file_reader.interface;
+    const write_buffer = gpa.alloc(u8, BUFFER_SIZE) catch {
+        logger.writeLine("OOM (write buffer)");
+        return 1;
+    };
+    defer gpa.free(write_buffer);
+    var out_file_writer = out_file.writer(init.io, write_buffer);
+    const writer = &out_file_writer.interface;
 
     // Prepare diagnostic aggregator
     var aggregator: pgen.diagnostic.Aggregator = .withLogging(gpa);
@@ -157,5 +174,102 @@ pub fn main(init: std.process.Init) u8 {
         return 1;
     };
     defer ast.deinit();
+    // XXX: `cfg` does borrow from `ast`-owned memory. See core/ast2cfg.zig
+    var cfg_managed = pgen.ast2cfg.CfgManaged.fromAst(ast.ebnf, &ast.pool, gpa, gpa) catch {
+        logger.writeLine("OOM (AST to CFG)");
+        return 1;
+    };
+    defer cfg_managed.deinit();
+    const cfg = cfg_managed.cfg;
+
+    // Debug dump the CFG
+    // dumpCfg(cfg);
+
+    // Currently just enable SLR backend.
+    var ds: pgen.lr0.DataStructures = .{ .allocator = gpa, .grammar = cfg };
+    defer ds.deinit();
+    const tarjan = ds.getFirstTarjan() catch {
+        logger.writeLine("OOM (FIRST graph Tarjan)");
+        return 1;
+    };
+    const first_reachability = ds.getFirstReachability() catch {
+        logger.writeLine("OOM (FIRST graph reachability)");
+        return 1;
+    };
+    const follow_set = ds.getFollowSet() catch {
+        logger.writeLine("OOM (FOLLOW set)");
+        return 1;
+    };
+    var backend: pgen.backends.SlrBackend(
+        pgen.backends.ZigSwitchActionHandler(void),
+        pgen.backends.ZigSwitchGotoHandler,
+    ) = .{
+        .emitter = .{
+            .out = writer,
+            .cst_owns_token = true,
+            .token_extra = &.{
+                // deinit does nothing for now
+                "pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {",
+                "    _ = self;",
+                "    _ = allocator;",
+                "}",
+            },
+        },
+        .follow_sets = &follow_set,
+        .action_handler = .{
+            .grammar = &cfg,
+            .conflict_resolver = {},
+        },
+        .goto_handler = .{},
+    };
+    defer backend.free();
+    pgen.lr0.lr0(
+        cfg,
+        tarjan,
+        first_reachability,
+        @TypeOf(backend),
+        &backend,
+        gpa,
+    ) catch |err| {
+        switch (err) {
+            error.OutOfMemory => logger.writeLine("OOM (LR(0) table gen)"),
+            error.WriteFailed => logger.writeLine("Write to output file failed"),
+            // TODO: diagnostics
+            error.LrConflict => logger.writeLine("Table gen conflict! Your grammar is ambiguous OR not SLR-compatible."),
+        }
+        return 1;
+    };
+    writer.flush() catch {
+        logger.writeLine("Flushing output stream failed");
+        return 1;
+    };
     return 0;
+}
+
+fn dumpCfg(cfg: pgen.cfg.Cfg) void {
+    std.debug.print("CFG dump (T={}, NT={}/{}, P={}, E=NT{})\n", .{
+        cfg.terminals.count,
+        cfg.nonterminals.count,
+        cfg.nonterminals.node_forming_count,
+        cfg.total_productions,
+        cfg.nonterminals.entry,
+    });
+    for (0..cfg.nonterminals.node_forming_count) |nt| {
+        std.debug.print("  NT{}: {s}\n", .{ nt, cfg.nonterminals.names[nt] });
+    }
+    for (0..cfg.total_productions) |prod| {
+        std.debug.print("  Prod({}) NT{}:", .{ prod, cfg.production_lhs[prod] });
+        for (cfg.productions[prod]) |sym| {
+            switch (sym) {
+                .terminal => |t| std.debug.print(" T{}", .{t}),
+                .nonterminal => |nt| std.debug.print(" NT{}", .{nt}),
+            }
+        }
+        std.debug.print("\n", .{});
+    }
+    std.debug.print("Pact:", .{});
+    for (cfg.production_pact[0..cfg.nonterminals.count]) |pact| {
+        std.debug.print(" {}", .{pact});
+    }
+    std.debug.print("\n", .{});
 }

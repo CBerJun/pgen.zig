@@ -75,11 +75,24 @@ pub const ExprPool = struct {
     allocator: std.mem.Allocator,
     /// All key pointers are interned, so you can `getEntry` on them.
     hashmap: std.HashMapUnmanaged(*const Expr, void, HashContext, std.hash_map.default_max_load_percentage),
+    /// AST-to-CFG relies on mutating states in the pool (specifically the
+    /// `Entry`s). Assigning an epoch number to each call of `astToCfg` allows
+    /// us to clean up lazily (at the cost of more memory used per entry).
+    epoch: Epoch,
+
+    pub const Epoch = u32;
 
     /// An entry in the pool representing one `Expr`. It contains extra
     /// objects used during AST-to-CFG.
     pub const Entry = struct {
         expr: Expr,
+        /// If this epoch is less than the owning pool's, the states here are
+        /// stale and from a previous call to `astToCfg`.
+        epoch: Epoch,
+
+        // Below fields are for business logic. See `astToCfg`.
+        uses: u32,
+        converted_nt: u32,
 
         pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
             self.expr.free(allocator);
@@ -101,6 +114,7 @@ pub const ExprPool = struct {
         return .{
             .allocator = allocator,
             .hashmap = .empty,
+            .epoch = 0,
         };
     }
 
@@ -137,6 +151,10 @@ pub const ExprPool = struct {
             const entry = try self.allocator.create(Entry);
             gop.key_ptr.* = &entry.expr;
             entry.expr = expr;
+            entry.epoch = 0;
+            // The rest of the `entry` are left undefined. All epochs obtained
+            // by AST-to-CFG are positive, so it will ensure they are initialized
+            // before using.
         }
         return gop.key_ptr.*;
     }
@@ -356,6 +374,12 @@ pub const ExprPool = struct {
         const realloc_buffer = try self.allocator.realloc(inners.ptr[0..num_inner], inners.len);
         free_inners = false;
         return self.intern(.{ .choose = realloc_buffer });
+    }
+
+    /// Only intended to be used by `astToCfg`.
+    pub fn obtainEpoch(self: *@This()) Epoch {
+        self.epoch += 1;
+        return self.epoch;
     }
 };
 
