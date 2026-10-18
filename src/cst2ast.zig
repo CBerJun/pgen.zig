@@ -48,7 +48,7 @@ pub const SemanticError = error{
 /// an arena for `scrap_allocator`. On error, it is not possible to remove
 /// already-interned expressions in `pool`.
 pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator, aggregator: *diagnostic.Aggregator) (SemanticError || std.mem.Allocator.Error)!ast.Ebnf {
-    // Pass 1: Label terminals and nonterminals with integers
+    // Pass 1: Collect terminals and nonterminals
     var named_terminals_map: std.StringHashMapUnmanaged(u32) = .empty;
     defer named_terminals_map.deinit(scrap_allocator); // Strings are borrowed
     var literal_terminals_map: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(u32)) = .empty;
@@ -220,15 +220,6 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
         }
     }
     const nonterminal_count = nonterminals_map.size;
-    // Resolve entry
-    const entry_nt = nonterminals_map.get(entry_nt_string) orelse {
-        return fatalAt(
-            aggregator,
-            entry_token,
-            "specified entry nonterminal '{s}' is undefined",
-            .{entry_nt_string},
-        );
-    };
     // Label nonterminals
     var node_forming_nt_names = try allocator.alloc([]u8, node_forming_nt_count);
     // Fill with empty slice to allow errdefer to clean up.
@@ -255,6 +246,15 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
         std.debug.assert(ids[0] == node_forming_nt_count);
         std.debug.assert(ids[1] == nonterminal_count);
     }
+    // Resolve entry
+    const entry_nt = nonterminals_map.get(entry_nt_string) orelse {
+        return fatalAt(
+            aggregator,
+            entry_token,
+            "specified entry nonterminal '{s}' is undefined",
+            .{entry_nt_string},
+        );
+    };
     // Label literal terminals
     var terminal_id: u32 = 0;
     var literal_collections = try allocator.alloc(cfg.LiteralCollection, literal_terminals_map.size);
