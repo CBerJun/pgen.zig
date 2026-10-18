@@ -247,7 +247,6 @@ pub const ExprPool = struct {
             }
             free_operands = false;
         }
-        std.mem.sortUnstable(*const Expr, inners, {}, ascPtr(Expr));
         return self.intern(.{ .concat = inners });
     }
 
