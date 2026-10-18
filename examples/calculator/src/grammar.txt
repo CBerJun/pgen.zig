@@ -1,0 +1,16 @@
+tokens {
+    INTEGER;
+    # Operators (they are automatically added as separate tokens when used)
+    "";
+}
+
+# Entry symbol is `expr`.
+entry expr;
+
+# + and - connects terms.
+expr: term (("+" | "-") term)*;
+# * and / connects factors and thus has higher precedence.
+term: factor (("*" | "/") factor)*;
+# A parenthesized expression is treated as a single factor. A single integer
+# is of course a factor.
+factor: INTEGER | "(" expr ")";
