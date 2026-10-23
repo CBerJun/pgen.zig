@@ -58,6 +58,117 @@ const Logger = struct {
     }
 };
 
+const CliParser = struct {
+    iterator: std.process.Args.Iterator,
+    /// Allocator for string options
+    allocator: std.mem.Allocator,
+    /// CLI errors use aggregator too
+    aggregator: *pgen.diagnostic.Aggregator,
+
+    // Following are parsed option values, owned by this struct
+    cst_owns_token: bool = false,
+    token_extra: []u8 = &.{},
+    in_file_path: []u8 = &.{},
+    out_file_path: []u8 = &.{},
+
+    pub fn init(process_init: std.process.Init, allocator: std.mem.Allocator, aggregator: *pgen.diagnostic.Aggregator) std.mem.Allocator.Error!@This() {
+        return .{
+            .iterator = try process_init.minimal.args.iterateAllocator(allocator),
+            .allocator = allocator,
+            .aggregator = aggregator,
+        };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.iterator.deinit();
+        self.allocator.free(self.token_extra);
+        self.allocator.free(self.in_file_path);
+        self.allocator.free(self.out_file_path);
+        self.* = undefined;
+    }
+
+    /// Run the parser, return successful or not
+    pub fn go(self: *@This()) bool {
+        // Skip argv[0]
+        if (!self.iterator.skip()) {
+            self.aggregator.add(.fatal, "expected argv[0] to exist", .{});
+            return false;
+        }
+        var end_of_options = false; // Reached forced end of option "--"
+        while (self.iterator.next()) |arg| {
+            if (arg.len == 0) {
+                self.aggregator.add(.warning, "skipping empty CLI argument", .{});
+            }
+            if (arg[0] != '-' or end_of_options) {
+                // Non-option, treat as input file
+                self.in_file_path = self.allocator.dupe(u8, arg) catch {
+                    self.aggregator.add(.fatal, "OOM (dupe in file path)", .{});
+                    return false;
+                };
+                if (self.iterator.skip()) {
+                    self.aggregator.add(.warning, "ignoring CLI arguments after {s}", .{self.in_file_path});
+                }
+                break;
+            }
+            // Now process options
+            const rest = arg[1..];
+            if (std.mem.eql(u8, rest, "-")) {
+                end_of_options = true;
+            } else if (std.mem.eql(u8, rest, "cst-owns-token")) {
+                self.cst_owns_token = true;
+            } else if (std.mem.eql(u8, rest, "token-extra")) {
+                if (self.token_extra.len > 0) {
+                    self.aggregator.add(.fatal, "-token-extra already set", .{});
+                    return false;
+                }
+                if (self.iterator.next()) |payload| {
+                    self.token_extra = self.allocator.dupe(u8, payload) catch {
+                        self.aggregator.add(.fatal, "OOM (dupe -token-extra)", .{});
+                        return false;
+                    };
+                } else {
+                    self.aggregator.add(.fatal, "expected parameter following -token-extra", .{});
+                    return false;
+                }
+            } else if (std.mem.eql(u8, rest, "o") or std.mem.eql(u8, rest, "out")) {
+                if (self.out_file_path.len > 0) {
+                    self.aggregator.add(.fatal, "-o/-out already set", .{});
+                    return false;
+                }
+                if (self.iterator.next()) |payload| {
+                    self.out_file_path = self.allocator.dupe(u8, payload) catch {
+                        self.aggregator.add(.fatal, "OOM (dupe -o/-out)", .{});
+                        return false;
+                    };
+                } else {
+                    self.aggregator.add(.fatal, "expected parameter following -o/-out", .{});
+                    return false;
+                }
+            } else if (std.mem.eql(u8, rest, "h")) {
+                std.debug.print(
+                    \\Usage: pgenzig [options] in_file
+                    \\
+                    \\Option list:
+                    \\    --                End of option list signal
+                    \\    -o/-out FILE      Output file
+                    \\    -cst-owns-token   If set, CSTNodes will own the passed in tokens. There is implication on mem management. See generated source's doc.
+                    \\    -token-extra CODE Extra source code to add into the Token struct.
+                    \\    -h                Print this message
+                    \\
+                , .{});
+            } else {
+                self.aggregator.add(.fatal, "unrecognized argument -{s}", .{rest});
+                return false;
+            }
+        }
+        if (self.in_file_path.len == 0) {
+            self.aggregator.add(.fatal, "expected input grammar path", .{});
+            return false;
+        }
+        return true;
+    }
+};
+
 pub fn main(init: std.process.Init) u8 {
     // Setup allocator (see https://ziglang.org/download/0.14.0/release-notes.html#SmpAllocator)
     const gpa, const is_debug = gpa: {
@@ -77,30 +188,43 @@ pub fn main(init: std.process.Init) u8 {
     };
     defer logger.deinit();
 
-    // Read the in file (grammar description)
-    var arg_it = init.minimal.args.iterateAllocator(gpa) catch {
-        logger.writeLine("OOM (argv)");
+    // Prepare diagnostic aggregator
+    var aggregator: pgen.diagnostic.Aggregator = .withLogging(gpa);
+    defer aggregator.deinit();
+    defer aggregator.printDiagnostics(logger.writer()) catch |err| {
+        logger.check(err);
+    };
+
+    var cli = CliParser.init(init, gpa, &aggregator) catch {
+        logger.writeLine("OOM (CLI parser)");
         return 1;
     };
-    defer arg_it.deinit();
-    if (!arg_it.skip()) {
-        logger.writeLine("expected argv[0] to exist");
+    defer cli.deinit();
+
+    if (!cli.go()) {
+        logger.writeLine("CLI parsing failed; pass -h to see usage");
         return 1;
     }
-    const in_file_path = arg_it.next() orelse {
-        logger.writeLine("expected input grammar path");
-        return 1;
-    };
-    const in_file = std.Io.Dir.cwd().openFile(init.io, in_file_path, .{ .allow_directory = false }) catch |err| {
+
+    // Read the in file (grammar description)
+    const in_file = std.Io.Dir.cwd().openFile(init.io, cli.in_file_path, .{ .allow_directory = false }) catch |err| {
         logger.printLine("failed to open in file: {s}", .{@errorName(err)});
         return 1;
     };
     defer in_file.close(init.io);
-    const out_file_path = arg_it.next() orelse {
-        logger.writeLine("expected output path");
-        return 1;
-    };
-    const out_file = std.Io.Dir.cwd().createFile(init.io, out_file_path, .{}) catch |err| {
+
+    // Invent an out file path if not specified
+    if (cli.out_file_path.len == 0) {
+        const suffix = ".zig";
+        cli.out_file_path = cli.allocator.alloc(u8, cli.in_file_path.len + suffix.len) catch {
+            logger.printLine("OOM (auto out file path)", .{});
+            return 1;
+        };
+        @memcpy(cli.out_file_path[0..cli.in_file_path.len], cli.in_file_path);
+        @memcpy(cli.out_file_path[cli.in_file_path.len..], suffix);
+    }
+
+    const out_file = std.Io.Dir.cwd().createFile(init.io, cli.out_file_path, .{}) catch |err| {
         logger.printLine("failed to open out file: {s}", .{@errorName(err)});
         return 1;
     };
@@ -119,13 +243,6 @@ pub fn main(init: std.process.Init) u8 {
     defer gpa.free(write_buffer);
     var out_file_writer = out_file.writer(init.io, write_buffer);
     const writer = &out_file_writer.interface;
-
-    // Prepare diagnostic aggregator
-    var aggregator: pgen.diagnostic.Aggregator = .withLogging(gpa);
-    defer aggregator.deinit();
-    defer aggregator.printDiagnostics(logger.writer()) catch |err| {
-        logger.check(err);
-    };
 
     // Tokenize and parse it
     var tokenizer: pgen.Tokenizer = .{
@@ -206,14 +323,8 @@ pub fn main(init: std.process.Init) u8 {
     ) = .{
         .emitter = .{
             .out = writer,
-            .cst_owns_token = true,
-            .token_extra = &.{
-                // deinit does nothing for now
-                "pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {",
-                "    _ = self;",
-                "    _ = allocator;",
-                "}",
-            },
+            .cst_owns_token = cli.cst_owns_token,
+            .token_extra = &.{cli.token_extra},
         },
         .follow_sets = &follow_set,
         .action_handler = .{

@@ -11,8 +11,9 @@ pub fn build(b: *std.Build) void {
     });
     const pgen_cli = pgen.artifact("pgenzig");
     const run_pgen = b.addRunArtifact(pgen_cli);
-    run_pgen.addFileArg(b.path("src/grammar.txt"));
+    run_pgen.addArg("-o");
     const parser_src = run_pgen.addOutputFileArg("parser.zig");
+    run_pgen.addFileArg(b.path("src/grammar.txt"));
     const parser_mod = b.createModule(.{
         .root_source_file = parser_src,
         .target = target,
