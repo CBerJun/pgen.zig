@@ -10,10 +10,11 @@ pub fn build(b: *std.Build) void {
     // Interestingly, to bootstrap pgen.zig we need to compile the core twice,
     // once for the host and once for the target. Though sometimes the host and
     // the target are the same.
+    const host_optimize: std.builtin.OptimizeMode = .Debug;
     const core_mod_host = b.createModule(.{
         .root_source_file = b.path("src/core/root.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = host_optimize,
     });
     const core_host_import: std.Build.Module.Import = .{ .name = "pgen_core", .module = core_mod_host };
 
@@ -23,7 +24,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/bootstrap/generate_meta_cfg.zig"),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = host_optimize,
         }),
     });
     const run_generate_meta_cfg = b.addRunArtifact(generate_meta_cfg_exe);
@@ -31,7 +32,7 @@ pub fn build(b: *std.Build) void {
     const meta_cfg_mod = b.createModule(.{
         .root_source_file = meta_cfg,
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = host_optimize,
         .imports = &.{core_host_import},
     });
 
@@ -41,7 +42,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/bootstrap/generate_meta_parser.zig"),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = host_optimize,
             .imports = &.{
                 core_host_import,
                 .{ .name = "pgen_meta_cfg", .module = meta_cfg_mod },
@@ -137,8 +138,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    demo_bridge.entry = .disabled;
-    demo_bridge.rdynamic = true;
+    demo_bridge.entry = .disabled; // No entry symbol
+    demo_bridge.rdynamic = true; // For `export fn` to be exported in WASM automatically
     if (demo) {
         b.installArtifact(demo_bridge);
     }
