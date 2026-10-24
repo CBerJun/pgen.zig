@@ -71,6 +71,56 @@ The Web Demo allows you to try pgen.zig in browser. It will generate a parser (i
 
 To build the in-browser demo you need Python (3.10+). Just run `demo/build.py` from the repo root, and the built website is in `demo/dist`. You can then use any software you like to serve the contents in it. Since we're already using Python, you can do `python -m http.server -d demo/dist` then navigate to `localhost:8000` in your browser to view the demo.
 
+## Technical documentation
+
+As a parser generator, pgen.zig reads in a stream of *tokens* and emits a *parse tree* (*concrete syntax tree*, or *CST* in short). For instance, if your're making a programming language then each identifier (e.g. `foo`, `variable_name`, `functionName`), keyword, literal (`"string"` or `42`), and punctuation (e.g. `+`, `-`, `.`, `>=`) can be considered a token. Tokens are the smallest unit your grammar can handle, and it's up to you to define what kinds of tokens to use. All tokens have a *tag* which indicates its kind (e.g. keyword/number/string/...). The CST has a tree structure, and it's easier to see an example than explaining it with words.
+
+### The grammar file
+
+pgen.zig takes in a plain text ASCII file and emits a Zig source file for it. The plain text specifies the grammar. It follows the following format:
+
+```text
+tokens {
+    NAMED_TOKEN1;
+    NAMED_TOKEN2;
+    "";  # Literal token with an empty suffix
+    ""sym;  # Literal token with "sym" as suffix
+}
+
+entry entry_nonterminal;
+
+entry_nonterminal:
+    # ... <right hand side>
+    ;
+# ... <more rules>
+```
+
+The `tokens` section declares all the token tags you will use. Each declaration ends with a semicolon. You may specify an identifier for a *named token* or use an empty string (with an optional suffix) for a *literal token*. Named tokens have a named tag and will be referred to directly using that name; literal tokens have tags identified by a string with a suffix (which can be empty). For instance, `NAMED`, `"wow"`, `"WOW"`, `"wow"sym`, `"+"sym` are all different tokens given the above `tokens` section. A literal token declaration in the `tokens` section merely declares the existence of that suffix. The compiler automatically collects all the literal tokens that have appeared in the grammar, so you don't need to declare them one by one. You simply declare the suffix.
+
+The rest of the grammar consists of definitions of *nonterminals*, and a single nonterminal that is marked as the *entry*. A *nonterminal* can be thought of as a component in your desired language. For instance, in a programming language you could have an `expr` nonterminal which indicates any expression, then you can reuse that `expr` component in many places, like the condition for an `if` statement, or the return value in a `return` statement. In fact, the entire language must in the end boil down to a single nonterminal, and that's the entry. For each nonterminal, you must specify its rule: what it can "expand" to. For instance, an `expr` can expand to `42` (a single number token), `20 + 40` (a number token followed by a plus punctuation followed by a number token), or `functionCall(10, 20)`, but not `return 30;` (a statement), `++` (invalid expression), or something else.
+
+To specify the expansion rule for a nonterminal, you can use a syntax similar to regular expressions (as a convention we'll use uppercase for token names and lowercase for nonterminal names, and `##`/`@@` will denote another full expression):
+
+* `x: A` means nonterminal `x` must expand to exactly the token `A`.
+* `x: y` means nonterminal `x` must expand to another nonterminal `y`.
+* `x: A b C` means nonterminal `x` must expand to token `A` followed by nonterminal `b`, then followed by token `C`.
+* `x: ## | @@` means nonterminal `x` must expand to either `##` or `@@`.
+* `x: (##)` means the same as `x: ##`.
+* `x: epsilon` means nonterminal `x` must expand to nothing.
+
+Now you can combine these to express many things:
+
+* `x: x ## | epsilon` means `x` must expand to zero or more `##`.
+  * pgen.zig provides `x: ##*` which is easier to read.
+* `x: x ## | ##` means `x` must expand to one or more `##`.
+  * pgen.zig provides `x: ##+` which is easier to read.
+* `x: ## | epsilon` means `x` must expand to either nothing or `##`.
+  * pgen.zig provides `x: [##]` which is easier to read.
+
+Now, to specify the rule for a nonterminal, you can use `nonterminal_name: ##;`. The `entry` declaration must come immediately after the `tokens` section.
+
+For some examples, you can check out [examples/calculator's grammar](examples/calculator/src/grammar.txt), or [pgen.zig grammar format's own grammar (the meta grammar)](src/bootstrap/meta_grammar.txt). The precedence rule of the operators can also be found out in the meta grammar.
+
 ## License
 
 Code and documentation in this repository are licensed under the Apache License, Version 2.0. See `LICENSE.txt`. You may also obtain a copy at <http://www.apache.org/licenses/LICENSE-2.0>.
