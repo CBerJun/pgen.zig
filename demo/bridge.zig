@@ -57,18 +57,28 @@ const ErrorReport = struct {
     }
 };
 
-// Returned buffer must be deinited with `pgenReleaseMessage`.
-export fn pgenParse(src_ptr: [*]const u8, src_len: usize, out_ptr: *[]const u8) void {
+// Returned buffer (`out_error`, `out_result`) must be deinited with
+// `releaseMessage`.
+export fn pgenParse(
+    src_ptr: [*]const u8,
+    src_len: usize,
+    out_error: *[]const u8,
+    out_result: *[]const u8,
+    // Config options
+    cst_owns_token: bool,
+) void {
     const src: []const u8 = src_ptr[0..src_len];
     var fixed_reader: std.Io.Reader = .fixed(src);
     const reader = &fixed_reader;
+
+    out_result.* = &.{};
 
     var aggregator: pgen.diagnostic.Aggregator = .withLogging(gpa);
     defer aggregator.deinit();
     var report: ErrorReport = .init();
     defer {
         report.dumpAggregator(&aggregator);
-        out_ptr.* = report.getResult();
+        out_error.* = report.getResult();
         report.deinit();
     }
 
@@ -132,6 +142,84 @@ export fn pgenParse(src_ptr: [*]const u8, src_len: usize, out_ptr: *[]const u8) 
         },
     };
     defer ast.deinit();
+    var cfg_managed = pgen.ast2cfg.CfgManaged.fromAst(ast.ebnf, &ast.pool, gpa, gpa) catch {
+        report.addError("OOM (AST to CFG)", .{});
+        return;
+    };
+    defer cfg_managed.deinit();
+    const cfg = cfg_managed.cfg;
+
+    // BELIEVE IT OR NOT, DELETING THIS STATEMENT BELOW CAUSES A CRASH AT
+    // RUNTIME: changing `cfg.total_productions` to something else that does
+    // not access `cfg` also causes crash. It's either an upstream bug in
+    // Zig compiler, or we are invoking illegal behavior. However this code
+    // is mostly adapted from the main CLI which runs just fine.
+    defer report.addError("Total CFG productions: {}\n", .{
+        cfg.total_productions,
+    });
+    // Currently just enable SLR backend.
+    var ds: pgen.lr0.DataStructures = .{ .allocator = gpa, .grammar = cfg };
+    defer ds.deinit();
+    const tarjan = ds.getFirstTarjan() catch {
+        report.addError("OOM (FIRST graph Tarjan)", .{});
+        return;
+    };
+    const first_reachability = ds.getFirstReachability() catch {
+        report.addError("OOM (FIRST graph reachability)", .{});
+        return;
+    };
+    const follow_set = ds.getFollowSet() catch {
+        report.addError("OOM (FOLLOW set)", .{});
+        return;
+    };
+
+    var result_alloc_writer: std.Io.Writer.Allocating = .init(gpa);
+    defer result_alloc_writer.deinit();
+    const writer = &result_alloc_writer.writer;
+
+    var backend: pgen.backends.SlrBackend(
+        pgen.backends.ZigSwitchActionHandler(void),
+        pgen.backends.ZigSwitchGotoHandler,
+    ) = .{
+        .emitter = .{
+            .out = writer,
+            .cst_owns_token = cst_owns_token,
+            // No -token-extra for web demo
+            .token_extra = &.{},
+        },
+        .follow_sets = &follow_set,
+        .action_handler = .{
+            .grammar = &cfg,
+            .conflict_resolver = {},
+        },
+        .goto_handler = .{},
+    };
+    defer backend.free();
+    pgen.lr0.lr0(
+        cfg,
+        tarjan,
+        first_reachability,
+        @TypeOf(backend),
+        &backend,
+        gpa,
+    ) catch |err| {
+        switch (err) {
+            error.OutOfMemory => report.addError("OOM (LR(0) table gen)", .{}),
+            error.WriteFailed => report.addError("Write to output file failed", .{}),
+            // TODO: diagnostics
+            error.LrConflict => report.addError("Table gen conflict! Your grammar is ambiguous OR not SLR-compatible.", .{}),
+        }
+        return;
+    };
+    writer.flush() catch {
+        report.addError("Flushing output stream failed", .{});
+        return;
+    };
+
+    out_result.* = result_alloc_writer.toOwnedSlice() catch {
+        report.addError("OOM (result to owned)", .{});
+        return;
+    };
 }
 
 export fn releaseMessage(buf: *const []const u8) void {

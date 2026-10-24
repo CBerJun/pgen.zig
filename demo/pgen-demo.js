@@ -6,13 +6,17 @@ WebAssembly.instantiateStreaming(fetch("pgen-bridge.wasm")).then(
     },
 );
 
-function backendParse(input) {
+function backendParse(input, cstOwnsToken) {
+    err = (message) => ({
+        stderrText: message,
+        stdoutText: "",
+    });
     if (!/^[\x00-\x7F]*$/.test(input))
-        return "ASCII only please";
+        return err("ASCII only please");
     if (wasmExports == null)
-        return "Loading... Try again later";
+        return err("Loading... Try again later");
     if (input == "")
-        return "Type something...";
+        return err("Type something...");
     const {
         memory, pgenParse, newMessagePtr,
         releaseMessage, newBuffer, freeBuffer,
@@ -22,28 +26,38 @@ function backendParse(input) {
     const inLen = input.length;
     const inBuffer = newBuffer(inLen);
     if (inBuffer == nullPtr)
-        return "Out of memory";
-    const msg = newMessagePtr();
-    if (msg == nullPtr) {
+        return err("Out of memory");
+    const stderr = newMessagePtr();
+    const stdout = newMessagePtr();
+    if (stderr == nullPtr || stdout == nullPtr) {
         freeBuffer(inBuffer, inLen);
-        return "Out of memory";
+        return err("Out of memory");
     }
     new TextEncoder().encodeInto(input, new Uint8Array(memory.buffer, inBuffer, inLen));
-    pgenParse(inBuffer, inLen, msg);
+    pgenParse(inBuffer, inLen, stderr, stdout, cstOwnsToken);
     freeBuffer(inBuffer, inLen);
-    const output = new TextDecoder().decode(new Uint8Array(
+
+    obtainMessage = (msg) => new TextDecoder().decode(new Uint8Array(
         memory.buffer, messagePtr(msg), messageLen(msg)
     ));
-    releaseMessage(msg);
-    return output;
+
+    const stderrText = obtainMessage(stderr);
+    const stdoutText = obtainMessage(stdout);
+    releaseMessage(stderr);
+    releaseMessage(stdout);
+    return {stderrText, stdoutText};
 }
 
 document.addEventListener('DOMContentLoaded', () => {
     const inputSource = document.getElementById("input-source");
-    const outputMessage = document.getElementById("output-message");
+    const cstOwnsToken = document.getElementById("cst-owns-token").checked;
+    const stderrBox = document.getElementById("output-stderr");
+    const stdoutBox = document.getElementById("output-stdout");
     let debounceTimer = null;
     function goParse() {
-        outputMessage.textContent = backendParse(inputSource.value);
+        const {stderrText, stdoutText} = backendParse(inputSource.value, cstOwnsToken);
+        stderrBox.textContent = (stderrText.length > 0) ? stderrText : "(no error)";
+        stdoutBox.textContent = (stdoutText.length > 0) ? stdoutText : "(no output)";
     }
     function onInputChanged() {
         if (debounceTimer != null)
@@ -51,4 +65,5 @@ document.addEventListener('DOMContentLoaded', () => {
         debounceTimer = setTimeout(goParse, 500);
     }
     inputSource.addEventListener('input', onInputChanged);
+    cstOwnsToken.addEventListener('change', onInputChanged);
 });

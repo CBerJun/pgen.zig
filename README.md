@@ -67,6 +67,8 @@ The input of pgen.zig (which describes a language) is itself a language! So pgen
 
 ### The Web Demo
 
+The Web Demo allows you to try pgen.zig in browser. It will generate a parser (in Zig source code) for you. But that's mainly for preview only since you'll need to have a Zig compiler and write downstream code to actually use the generated code.
+
 To build the in-browser demo you need Python (3.10+). Just run `demo/build.py` from the repo root, and the built website is in `demo/dist`. You can then use any software you like to serve the contents in it. Since we're already using Python, you can do `python -m http.server -d demo/dist` then navigate to `localhost:8000` in your browser to view the demo.
 
 ## License

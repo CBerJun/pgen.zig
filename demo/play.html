@@ -26,13 +26,54 @@ factor:
     | "sin" number  # We can allow omitting parentheses when a number follows too
     ;
     </pre>
-    <p>Try to mess around with the grammar and see how the program detects a problem in the grammar (e.g. undeclared name). Of course, in the near future the parser generator will be complete and it will be able to start generating parsers for your custom grammar!</p>
+    <p>You can also try to play with pgen.zig's own grammar for specifying grammar (the "meta grammar"); pgen.zig uses itself to generate its parser!:</p>
+    <pre>
+tokens {
+    WORD;
+    STRING;
+    "";
+    ""k;
+}
+
+entry grammar;
+
+grammar:
+    "tokens"k "{"
+        token_decl+
+    "}"
+    "entry"k WORD ";"
+    production+;
+# String must be empty in token_decl but no way to enforce that
+token_decl: (WORD | STRING) ";";
+production: nonterminal_qualifier WORD ":" rhs ";";
+nonterminal_qualifier: ["nodeless"k];
+
+rhs_atom:
+    WORD  # Non-terminal/terminal
+    | STRING  # Terminal, must be nonempty but no way to enforce that
+    | "(" rhs ")"
+    | "[" rhs "]";  # Optional
+# Stacking * and + (e.g. "*+") never makes sense
+rhs_term: rhs_atom ["*" | "+"];
+rhs_factor:
+    rhs_term+
+    | "epsilon"k;
+rhs: rhs_factor ("|" rhs_factor)*;
+    </pre>
+    <p>Try to mess around with the grammar and see how the program detects a problem in the grammar (e.g. undeclared name).</p>
     <div id="app">
         <p>Input grammar:</p>
         <textarea id="input-source"></textarea>
-        <p>Output:</p>
-        <pre id="output-message">Grammar check result will be displayed here.</pre>
-        <p>In the future, this will be replaced by a custom input box and a visualization of the generated parse tree.</p>
+        <p>
+            <label for="cst-owns-token">Generated parse tree owns token:</label>
+            <input id="cst-owns-token" type="checkbox" name="cst-owns-token">
+        </p>
+        <p>Diagnostics:</p>
+        <pre id="output-stderr">Errors and warnings are displayed here.</pre>
+        <p>Output Zig program:</p>
+        <pre id="output-stdout">Zig source code will be displayed here, if successful.</pre>
+        <p>How do I use the generated program? You'll have to write some Zig code to use the generated code!</p>
+        <p>In the future, this might be replaced by a custom input box and a visualization of the generated parse tree (that will require running a Zig compiler in your browser).</p>
     </div>
 </body>
 

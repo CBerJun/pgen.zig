@@ -12,7 +12,7 @@
 <body>
     <h1>pgen.zig Intro</h1>
     <p>pgen.zig is a <span class="italic">parser generator</span> for the Zig programming language.</p>
-    <p>If you don't know what a parser generator is, I'll briefly explain. If you already know, you can head to the <a href="play.html">demo page</a> which allows you type in a custom grammar and check the validity of the grammar itself.</p>
+    <p>If you don't know what a parser generator is, I'll briefly explain. If you already know, you can head to the <a href="play.html">demo page</a>.</p>
     <p>Programs often need to understand text with a particular structure: a configuration file, a search query, or a mathematical expression. Splitting strings may work for simple inputs, but becomes difficult when the text contains nested parentheses or rules about which operations happen first.</p>
     <p><span class="italic">Parsing</span> is the process of identifying how input fits a set of structural rules, called a <span class="italic">grammar</span>. A parser can check whether the input follows those rules and organize its contents into a <span class="italic">parse tree</span> that other code can process.</p>
     <p>A <span class="italic">parser generator</span> automatically creates parser code from a grammar. Instead of manually writing the logic for recognizing every valid combination, you describe the structure your input should follow. Different generators use different grammar formats and parsing techniques, but the central idea is the same: express the rules explicitly and automate much of their implementation.</p>
@@ -28,7 +28,7 @@ digit      = "0" | "1" | "2" | "3" | "4"
     <p>Here, quoted text represents literal characters, | means "or," commas join items in sequence, and braces mean "repeat zero or more times." Isn't it like a more powerful version of regular expressions?</p>
     <p>This grammar accepts <span class="code">2 + 3 * 4</span> and <span class="code">(2 + 3) * 4</span>, but rejects <span class="code">2 + * 3</span>. Its structure also places multiplication inside addition's operands, expressing that multiplication takes priority. Parentheses allow an entire expression to act as one factor.</p>
     <p>Your application can then use the parsed structure to calculate a result: 14 for the first expression and 20 for the second. Parsing establishes the structure; your code supplies its meaning. The same separation is useful for interpreting commands, reading structured data, and implementing programming languages.</p>
-    <p>Now you can head to the <a href="play.html">demo page</a> which allows you type in a custom grammar (in pgen.zig's own format) and check the validity of the grammar itself. The project is work-in-progress, so it cannot generate parsers just yet.</p>
+    <p>Now you can head to the <a href="play.html">demo page</a> which allows you type in a custom grammar (in pgen.zig's own format) and generate a parser for it (presented as Zig source code).</p>
 </body>
 
 </html>
