@@ -8,3 +8,4 @@ pub const cst2ast = @import("./cst2ast.zig");
 pub const ast2cfg = core.ast2cfg;
 pub const backends = core.backends;
 pub const lr0 = core.lr0;
+pub const explain = @import("./explain.zig");

@@ -62,4 +62,12 @@ pub const CfgProductions = struct {
             .owner = self,
         };
     }
+
+    pub fn get(self: @This(), production_id: u32) Rule {
+        return .{
+            .id = production_id,
+            .lhs = self.lhs[production_id],
+            .rhs = self.rhs[production_id],
+        };
+    }
 };

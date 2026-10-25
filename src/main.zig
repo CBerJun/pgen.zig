@@ -353,8 +353,24 @@ pub fn main(init: std.process.Init) u8 {
         switch (err) {
             error.OutOfMemory => logger.writeLine("OOM (LR(0) table gen)"),
             error.WriteFailed => logger.writeLine("Write to output file failed"),
-            // TODO: diagnostics
-            error.LrConflict => logger.writeLine("Table gen conflict! Your grammar is ambiguous OR not SLR-compatible."),
+            error.LrConflict => {
+                logger.writeLine("Table gen conflict! Your grammar is ambiguous OR not SLR-compatible.");
+                const cr = backend.conflict_report.?;
+                pgen.explain.conflict(
+                    gpa,
+                    pgen.lr0.Item,
+                    logger.writer(),
+                    cfg_managed.symbol_spec,
+                    cfg_managed.productions,
+                    cr,
+                ) catch |err2| {
+                    switch (err2) {
+                        error.OutOfMemory => logger.writeLine("OOM (conflict message)"),
+                        error.WriteFailed => |e| logger.check(e),
+                    }
+                    return 1;
+                };
+            },
         }
         return 1;
     };
