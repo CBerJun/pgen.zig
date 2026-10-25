@@ -28,13 +28,18 @@ const ErrorReport = struct {
         return &self.allocating_writer.writer;
     }
 
+    pub fn signalWriteFailed(self: *@This()) void {
+        // The reason an allocating writer fails is because OOM.
+        self.oom = true;
+    }
+
     pub fn addError(self: *@This(), comptime fmt: []const u8, args: anytype) void {
         self.failed = true;
         if (self.oom)
             return;
         self.writer().print(fmt, args) catch {
             // The reason an allocating writer fails is OOM
-            self.oom = true;
+            self.signalWriteFailed();
         };
     }
 
@@ -44,7 +49,7 @@ const ErrorReport = struct {
         if (self.oom)
             return;
         aggregator.printDiagnostics(self.writer()) catch {
-            self.oom = true;
+            self.signalWriteFailed();
         };
     }
 
@@ -205,8 +210,24 @@ export fn pgenParse(
         switch (err) {
             error.OutOfMemory => report.addError("OOM (LR(0) table gen)", .{}),
             error.WriteFailed => report.addError("Write to output file failed", .{}),
-            // TODO: diagnostics
-            error.LrConflict => report.addError("Table gen conflict! Your grammar is ambiguous OR not SLR-compatible.", .{}),
+            error.LrConflict => {
+                report.addError("Table gen conflict! Your grammar is ambiguous OR not SLR-compatible.\n", .{});
+                const cr = backend.conflict_report.?;
+                pgen.explain.conflict(
+                    gpa,
+                    pgen.lr0.Item,
+                    report.writer(),
+                    cfg_managed.symbol_spec,
+                    cfg_managed.productions,
+                    cr,
+                ) catch |err2| {
+                    switch (err2) {
+                        error.OutOfMemory => report.addError("OOM (conflict message)", .{}),
+                        error.WriteFailed => report.signalWriteFailed(),
+                    }
+                    return;
+                };
+            },
         }
         return;
     };
