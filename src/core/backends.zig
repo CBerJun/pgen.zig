@@ -8,7 +8,10 @@ const cfg = @import("./cfg.zig");
 const sym = @import("./sym.zig");
 
 /// Generic error for indicating a cause of LR parse table conflict
-const ConflictError = error{LrConflict};
+const ConflictError = error{
+    /// An *unresolved* LR conflict.
+    LrConflict,
+};
 
 /// Format a possibly empty grammar identifier (turned into @".") as a Zig
 /// identifier
@@ -814,9 +817,8 @@ pub fn SlrBackend(comptime ActionHandler: type, comptime GotoHandler: type) type
         action_handler: ActionHandler,
         /// GOTO handler
         goto_handler: GotoHandler,
-        /// If there is a conflict, it will be logged to here; otherwise it's
-        /// undefined.
-        conflict_report: ReportedConflict(lr0.Item) = undefined,
+        /// If there is a conflict, it will be logged to here.
+        conflict_report: ?ReportedConflict(lr0.Item) = null,
         // Internal fields:
         /// A `states` of `null` means `beginTableGen` has not been called.
         states: ?*const std.ArrayList([]lr0.Item) = null,
@@ -833,6 +835,8 @@ pub fn SlrBackend(comptime ActionHandler: type, comptime GotoHandler: type) type
             self.states = null;
             self.action_handler.free(self.allocator);
             self.goto_handler.free(self.allocator);
+            if (self.conflict_report) |cr|
+                cr.free(self.allocator);
         }
 
         pub const Error = ConflictError || std.Io.Writer.Error || std.mem.Allocator.Error;
