@@ -63,13 +63,12 @@ pub const Tokenizer = struct {
         errdefer string.deinit(self.payload_allocator);
         var has_more = true;
         var bytes_consumed: usize = 0;
-        const quote_loc = self.current_loc;
         while (has_more) {
             bytes_consumed += self.reader.streamDelimiter(writer, '"') catch |err| switch (err) {
                 error.WriteFailed => return error.OutOfMemory,
                 error.ReadFailed => |e| return e,
                 error.EndOfStream => {
-                    self.fatalAt(quote_loc, "unclosed double quote (end of file reached)", .{});
+                    self.fatalAt(self.current_loc, "unclosed double quote (end of file reached)", .{});
                     return error.InvalidSyntax;
                 },
             };
@@ -97,14 +96,14 @@ pub const Tokenizer = struct {
                             },
                             '"' => unreachable,
                             else => |ch| {
-                                self.fatalAt(quote_loc, "invalid escape \\{c} in string", .{ch});
+                                self.fatalAt(self.current_loc, "invalid escape \\{c} in string", .{ch});
                                 return error.InvalidSyntax;
                             },
                         }
                     },
                     '"' => unreachable,
                     '\n' => {
-                        self.fatalAt(quote_loc, "unclosed double quote (newline reached)", .{});
+                        self.fatalAt(self.current_loc, "unclosed double quote (newline reached)", .{});
                         return error.InvalidSyntax;
                     },
                     else => {
