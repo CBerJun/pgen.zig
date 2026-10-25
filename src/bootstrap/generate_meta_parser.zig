@@ -1,8 +1,7 @@
 //! Generates the meta parser.
 const std = @import("std");
 const pgen_core = @import("pgen_core");
-const Cfg = pgen_core.cfg.Cfg;
-const meta_cfg: Cfg = @import("pgen_meta_cfg").meta_cfg;
+const meta_cfg = @import("pgen_meta_cfg");
 
 pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -16,7 +15,11 @@ pub fn main(init: std.process.Init) !void {
     const file = try std.Io.Dir.cwd().createFile(init.io, out_file_name, .{});
     defer file.close(init.io);
 
-    var ds: pgen_core.lr0.DataStructures = .{ .allocator = allocator, .grammar = meta_cfg };
+    var ds: pgen_core.lr0.DataStructures = .{
+        .allocator = allocator,
+        .symbol_spec = meta_cfg.meta_symbol_spec,
+        .productions = meta_cfg.meta_productions,
+    };
     defer ds.deinit();
 
     const follow_set = try ds.getFollowSet();
@@ -70,13 +73,14 @@ pub fn main(init: std.process.Init) !void {
         },
         .follow_sets = &follow_set,
         .action_handler = .{
-            .grammar = &meta_cfg,
+            .symbol_spec = &meta_cfg.meta_symbol_spec,
+            .productions = &meta_cfg.meta_productions,
             .conflict_resolver = {},
         },
         .goto_handler = .{},
     };
     defer backend.free();
-    try pgen_core.lr0.lr0(meta_cfg, tarjan, reachability, @TypeOf(backend), &backend, allocator);
+    try pgen_core.lr0.lr0(meta_cfg.meta_symbol_spec, meta_cfg.meta_productions, tarjan, reachability, @TypeOf(backend), &backend, allocator);
     try writer.flush();
 }
 

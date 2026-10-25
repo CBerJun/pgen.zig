@@ -1,6 +1,5 @@
 //! Abstract syntax tree for a grammar (EBNF)
 const std = @import("std");
-const cfg = @import("./cfg.zig");
 
 /// Less than comparison function to sort by pointer's numeric value.
 /// Works well if you just need an arbitrary ordering between unique objects.
@@ -119,13 +118,6 @@ pub const ExprPool = struct {
     }
 
     pub fn deinit(self: *@This()) void {
-        // {
-        //     std.debug.print("deinit()\n", .{});
-        //     var it = self.hashmap.keyIterator();
-        //     while (it.next()) |key| {
-        //         std.debug.print("  {any}\n", .{key.*.*});
-        //     }
-        // }
         var it = self.hashmap.keyIterator();
         while (it.next()) |key| {
             self.allocator.destroy(self.getEntry(key.*));
@@ -138,11 +130,6 @@ pub const ExprPool = struct {
     /// to the interned expr owned by the pool. The ownership of the expr
     /// passed in is destroyed or transferred to the pool.
     pub fn intern(self: *@This(), expr: Expr) std.mem.Allocator.Error!*const Expr {
-        // std.debug.print("intern({})\n", .{expr});
-        // var it = self.hashmap.keyIterator();
-        // while (it.next()) |key| {
-        //     std.debug.print("  {any}\n", .{key.*.*});
-        // }
         const gop = try self.hashmap.getOrPut(self.allocator, &expr);
         if (gop.found_existing) {
             var expr_var = expr;
@@ -383,20 +370,14 @@ pub const ExprPool = struct {
     }
 };
 
-pub const SymbolSpec = struct {
-    /// Labelling of terminals. This will pass down as is to the `cfg.Cfg`
-    /// object.
-    terminals: cfg.Terminals,
-    /// Labelling of nonterminals. This will pass down to the `cfg.Cfg` object
-    /// but auxiliary nonterminals may be added during EBNF-to-CFG. Those aux
-    /// nts always use new IDs and so existing nts' IDs won't change.
-    nonterminals: cfg.Nonterminals,
-};
-
 /// The EBNF production associated with each nt. Length is
-/// the corresponding `SymbolSpec`'s `nonterminals.count`.
+/// the corresponding `sym.SymbolSpec`'s `nonterminals.count`.
 pub const EbnfProductions = [*]*const Expr;
 
 // Together, `SymbolSpec` and `EbnfProductions` serve as an intermediate form
 // of grammar, in EBNF style. They are separate since they have different
 // lifetime during compilation.
+// The `terminals` in symbol spec will pass down as is to the CFG form; the
+// `nonterminals` will also be reused in the CFG, the only difference being
+// there might be addition auxiliary nonterminals introduced (during AST-to-CFG).
+// Those aux nts always use new IDs and so existing nts' IDs won't change.

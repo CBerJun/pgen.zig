@@ -1,5 +1,6 @@
 const core = @import("pgen_core");
 pub const cfg = core.cfg;
+pub const sym = core.sym;
 pub const diagnostic = core.diagnostic;
 pub const psr = @import("pgen_meta_parser");
 pub const Tokenizer = @import("./tokenizer.zig").Tokenizer;

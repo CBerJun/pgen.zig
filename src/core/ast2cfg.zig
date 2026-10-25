@@ -33,25 +33,30 @@
 const std = @import("std");
 const cfg = @import("./cfg.zig");
 const ast = @import("./ast.zig");
+const sym = @import("./sym.zig");
 const diagnostic = @import("./diagnostic.zig");
 
-/// Managed `cfg.Cfg` with an arena allocator owning all memory except
-/// `.terminals` and `.nonterminals` (which are borrowed).
+/// Managed CFG form with an arena allocator owning all memory of `productions`.
+/// The `symbol_spec` is *derived* from the given symbol spec and is considered
+/// to be borrowed/shared.
 pub const CfgManaged = struct {
-    cfg: cfg.Cfg,
+    symbol_spec: sym.SymbolSpec,
+    productions: cfg.CfgProductions,
     arena: *std.heap.ArenaAllocator,
     /// Owner of `arena`.
     allocator: std.mem.Allocator,
 
-    pub fn fromAst(symbol_spec: ast.SymbolSpec, productions: ast.EbnfProductions, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
+    pub fn fromAst(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
         var arena = try allocator.create(std.heap.ArenaAllocator);
         arena.* = .init(allocator);
         errdefer {
             arena.deinit();
             allocator.destroy(arena);
         }
+        const new_symbol_spec, const cfg_productions = try astToCfg(symbol_spec, productions, pool, arena.allocator(), scrap_allocator);
         return .{
-            .cfg = try astToCfg(symbol_spec, productions, pool, arena.allocator(), scrap_allocator),
+            .symbol_spec = new_symbol_spec,
+            .productions = cfg_productions,
             .arena = arena,
             .allocator = allocator,
         };
@@ -66,7 +71,7 @@ pub const CfgManaged = struct {
 
 /// Converts AST to CFG.
 const AstToCfg = struct {
-    symbol_spec: ast.SymbolSpec,
+    symbol_spec: sym.SymbolSpec,
     productions: ast.EbnfProductions,
     pool: *ast.ExprPool,
 
@@ -90,7 +95,7 @@ const AstToCfg = struct {
         target: u32,
     };
 
-    pub fn init(symbol_spec: ast.SymbolSpec, productions: ast.EbnfProductions, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) @This() {
+    pub fn init(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) @This() {
         return .{
             .symbol_spec = symbol_spec,
             .productions = productions,
@@ -326,7 +331,7 @@ const AstToCfg = struct {
     }
 
     /// Lastly, sort production list and generate the pact representation.
-    pub fn getResult(self: *@This()) std.mem.Allocator.Error!cfg.Cfg {
+    pub fn getResult(self: *@This()) std.mem.Allocator.Error!struct { sym.SymbolSpec, cfg.CfgProductions } {
         const productions = try self.pm.productions.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(productions);
         const total_productions: u32 = @intCast(productions.len);
@@ -361,7 +366,7 @@ const AstToCfg = struct {
             }
         }
 
-        return .{
+        return .{ sym.SymbolSpec{
             .terminals = self.symbol_spec.terminals,
             .nonterminals = .{
                 .entry = self.symbol_spec.nonterminals.entry,
@@ -369,11 +374,12 @@ const AstToCfg = struct {
                 .node_forming_count = self.symbol_spec.nonterminals.node_forming_count,
                 .names = self.symbol_spec.nonterminals.names,
             },
+        }, cfg.CfgProductions{
             .total_productions = total_productions,
             .productions = productions.ptr,
             .production_lhs = production_lhs.ptr,
             .production_pact = production_pact.ptr,
-        };
+        } };
     }
 };
 
@@ -408,7 +414,7 @@ const ProductionsManager = struct {
 
 /// This mutates states in the `pool`'s entries, so it is not safe for
 /// concurrent use.
-pub fn astToCfg(symbol_spec: ast.SymbolSpec, productions: ast.EbnfProductions, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!cfg.Cfg {
+pub fn astToCfg(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { sym.SymbolSpec, cfg.CfgProductions } {
     var ast2cfg: AstToCfg = .init(symbol_spec, productions, pool, allocator, scrap_allocator);
     defer ast2cfg.deinit();
     try ast2cfg.pass1();

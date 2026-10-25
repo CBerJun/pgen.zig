@@ -2,7 +2,7 @@ const std = @import("std");
 const psr = @import("pgen_meta_parser");
 const pgen_core = @import("pgen_core");
 const ast = pgen_core.ast;
-const cfg = pgen_core.cfg;
+const sym = pgen_core.sym;
 const diagnostic = pgen_core.diagnostic;
 
 /// Managed `ast.Ebnf` with an arena allocator and `ExprPool` which holds
@@ -11,7 +11,7 @@ const diagnostic = pgen_core.diagnostic;
 /// AST-to-CFG stage may reuse `Nonterminals` and `Terminals` objects for
 /// CFG.
 pub const EbnfManaged = struct {
-    symbol_spec: ast.SymbolSpec,
+    symbol_spec: sym.SymbolSpec,
     productions: ast.EbnfProductions,
     /// The pool from which all `Expr`s in `productions` are interned.
     pool: ast.ExprPool,
@@ -23,7 +23,7 @@ pub const EbnfManaged = struct {
     allocator: std.mem.Allocator,
 
     pub const SymbolSpecManaged = struct {
-        symbol_spec: ast.SymbolSpec,
+        symbol_spec: sym.SymbolSpec,
         arena: *std.heap.ArenaAllocator,
 
         /// Use the same allocator as `EbnfManaged`'s `allocator`.
@@ -102,7 +102,7 @@ pub const SemanticError = error{
 /// `expr_allocator` or `symbol_allocator`. Do not pass in an arena for
 /// `scrap_allocator`. On error, it is not possible to remove already-interned
 /// expressions in `pool`.
-pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.Allocator, symbol_allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator, aggregator: *diagnostic.Aggregator) (SemanticError || std.mem.Allocator.Error)!struct { ast.SymbolSpec, ast.EbnfProductions } {
+pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.Allocator, symbol_allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator, aggregator: *diagnostic.Aggregator) (SemanticError || std.mem.Allocator.Error)!struct { sym.SymbolSpec, ast.EbnfProductions } {
     // Pass 1: Collect terminals and nonterminals
     var named_terminals_map: std.StringHashMapUnmanaged(u32) = .empty;
     defer named_terminals_map.deinit(scrap_allocator); // Strings are borrowed
@@ -312,7 +312,7 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.
     };
     // Label literal terminals
     var terminal_id: u32 = 0;
-    var literal_collections = try symbol_allocator.alloc(cfg.LiteralCollection, literal_terminals_map.size);
+    var literal_collections = try symbol_allocator.alloc(sym.LiteralCollection, literal_terminals_map.size);
     var literal_terminal_i: u32 = 0;
     errdefer {
         for (literal_collections[0..literal_terminal_i]) |collection| {
@@ -390,7 +390,7 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.
         const nt = nonterminals_map.get(nt_string).?;
         productions[nt] = try converter.rhs(rhs);
     }
-    return .{ ast.SymbolSpec{
+    return .{ sym.SymbolSpec{
         .terminals = .{
             .eoi = terminal_id,
             .count = terminal_id + 1,

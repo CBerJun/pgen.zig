@@ -300,13 +300,16 @@ pub fn main(init: std.process.Init) u8 {
     };
     defer symbol_spec.deinit(gpa);
     defer cfg_managed.deinit();
-    const cfg = cfg_managed.cfg;
 
     // Debug dump the CFG
     // dumpCfg(cfg);
 
     // Currently just enable SLR backend.
-    var ds: pgen.lr0.DataStructures = .{ .allocator = gpa, .grammar = cfg };
+    var ds: pgen.lr0.DataStructures = .{
+        .allocator = gpa,
+        .symbol_spec = cfg_managed.symbol_spec,
+        .productions = cfg_managed.productions,
+    };
     defer ds.deinit();
     const tarjan = ds.getFirstTarjan() catch {
         logger.writeLine("OOM (FIRST graph Tarjan)");
@@ -331,14 +334,16 @@ pub fn main(init: std.process.Init) u8 {
         },
         .follow_sets = &follow_set,
         .action_handler = .{
-            .grammar = &cfg,
+            .symbol_spec = &cfg_managed.symbol_spec,
+            .productions = &cfg_managed.productions,
             .conflict_resolver = {},
         },
         .goto_handler = .{},
     };
     defer backend.free();
     pgen.lr0.lr0(
-        cfg,
+        cfg_managed.symbol_spec,
+        cfg_managed.productions,
         tarjan,
         first_reachability,
         @TypeOf(backend),
@@ -360,20 +365,20 @@ pub fn main(init: std.process.Init) u8 {
     return 0;
 }
 
-fn dumpCfg(cfg: pgen.cfg.Cfg) void {
+fn dumpCfg(symbol_spec: pgen.sym.SymbolSpec, productions: pgen.cfg.CfgProductions) void {
     std.debug.print("CFG dump (T={}, NT={}/{}, P={}, E=NT{})\n", .{
-        cfg.terminals.count,
-        cfg.nonterminals.count,
-        cfg.nonterminals.node_forming_count,
-        cfg.total_productions,
-        cfg.nonterminals.entry,
+        symbol_spec.terminals.count,
+        symbol_spec.nonterminals.count,
+        symbol_spec.nonterminals.node_forming_count,
+        symbol_spec.total_productions,
+        symbol_spec.nonterminals.entry,
     });
-    for (0..cfg.nonterminals.node_forming_count) |nt| {
-        std.debug.print("  NT{}: {s}\n", .{ nt, cfg.nonterminals.names[nt] });
+    for (0..symbol_spec.nonterminals.node_forming_count) |nt| {
+        std.debug.print("  NT{}: {s}\n", .{ nt, symbol_spec.nonterminals.names[nt] });
     }
-    for (0..cfg.total_productions) |prod| {
-        std.debug.print("  Prod({}) NT{}:", .{ prod, cfg.production_lhs[prod] });
-        for (cfg.productions[prod]) |sym| {
+    for (0..productions.total_productions) |prod| {
+        std.debug.print("  Prod({}) NT{}:", .{ prod, productions.production_lhs[prod] });
+        for (productions.productions[prod]) |sym| {
             switch (sym) {
                 .terminal => |t| std.debug.print(" T{}", .{t}),
                 .nonterminal => |nt| std.debug.print(" NT{}", .{nt}),
@@ -382,7 +387,7 @@ fn dumpCfg(cfg: pgen.cfg.Cfg) void {
         std.debug.print("\n", .{});
     }
     std.debug.print("Pact:", .{});
-    for (cfg.production_pact[0..cfg.nonterminals.count]) |pact| {
+    for (productions.production_pact[0..symbol_spec.nonterminals.count]) |pact| {
         std.debug.print(" {}", .{pact});
     }
     std.debug.print("\n", .{});

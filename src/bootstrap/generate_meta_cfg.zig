@@ -154,10 +154,12 @@ pub fn main(init: std.process.Init) !void {
 
     // --- Write output
     try writer.writeAll(
-        \\const cfg = @import("pgen_core").cfg;
-        \\pub const meta_cfg: cfg.Cfg = .{
+        \\const pgen_core = @import("pgen_core");
+        \\const cfg = pgen_core.cfg;
+        \\const sym = pgen_core.sym;
+        \\pub const meta_symbol_spec: sym.SymbolSpec = .{
         \\.terminals = .{
-        \\.literal = &[_]cfg.LiteralCollection{
+        \\.literal = &[_]sym.LiteralCollection{
     );
     try writeLiteralCollection(writer, "", Sym);
     try writeLiteralCollection(writer, "k", Keyword);
@@ -181,6 +183,8 @@ pub fn main(init: std.process.Init) !void {
         \\.node_forming_count = {},
         \\.count = {},
         \\}},
+        \\}};
+        \\pub const meta_productions: cfg.CfgProductions = .{{
         \\.total_productions = {},
         \\.production_lhs = &[_]u32{{
     , .{ enumSize(Nt), total_nts, pm.n_prods }); // End .nonterminals
@@ -214,7 +218,7 @@ pub fn main(init: std.process.Init) !void {
             try writer.writeAll("},");
         }
     }
-    try writer.writeAll("}};"); // End .productions, meta_cfg
+    try writer.writeAll("}};"); // End .productions, meta_productions
 
     try writer.flush();
 }

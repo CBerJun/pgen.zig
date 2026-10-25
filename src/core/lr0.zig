@@ -3,21 +3,22 @@
 const std = @import("std");
 const digraph = @import("./digraph.zig");
 const cfg = @import("./cfg.zig");
+const sym = @import("./sym.zig");
 
 /// Graph of nonterminals.
 /// Edge u -> v iff there is a production for u starting with v. This
 /// graph can contain self loops and parallel edges, though parallel
 /// edges are redundant (the number don't have to reflect how many such
 /// productions exist)
-pub fn firstGraph(grammar: cfg.Cfg, allocator: std.mem.Allocator) std.mem.Allocator.Error!digraph.Digraph {
-    const graph: digraph.Digraph = try .empty(grammar.nonterminals.count, allocator);
+pub fn firstGraph(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, allocator: std.mem.Allocator) std.mem.Allocator.Error!digraph.Digraph {
+    const graph: digraph.Digraph = try .empty(symbol_spec.nonterminals.count, allocator);
     errdefer graph.free(allocator);
 
-    for (0..grammar.nonterminals.count) |nt| {
+    for (0..symbol_spec.nonterminals.count) |nt| {
         var succ: std.ArrayList(u32) = .empty;
         errdefer succ.deinit(allocator);
 
-        for (grammar.productionsOf(@intCast(nt))) |rhs| {
+        for (productions.productionsOf(symbol_spec, @intCast(nt))) |rhs| {
             if (rhs.len > 0) {
                 switch (rhs[0]) {
                     .nonterminal => |x| try succ.append(allocator, x),
@@ -42,17 +43,17 @@ pub const DefUse = struct {
         allocator.free(self.uses);
     }
 
-    pub fn fromCfg(grammar: cfg.Cfg, allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
-        const result = @This(){ .uses = try allocator.alloc(std.ArrayList(u32), grammar.nonterminals.count) };
+    pub fn fromCfg(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
+        const result = @This(){ .uses = try allocator.alloc(std.ArrayList(u32), symbol_spec.nonterminals.count) };
         for (result.uses) |*list| {
             list.* = .empty;
         }
         errdefer result.free(allocator);
-        for (0..grammar.nonterminals.count) |nt_l| {
-            var prod_index = grammar.production_pact[nt_l];
-            const prod_end = grammar.productionEndIndexOf(@intCast(nt_l));
+        for (0..symbol_spec.nonterminals.count) |nt_l| {
+            var prod_index = productions.production_pact[nt_l];
+            const prod_end = productions.productionEndIndexOf(symbol_spec, @intCast(nt_l));
             while (prod_index < prod_end) : (prod_index += 1) {
-                for (grammar.productions[prod_index]) |symbol| {
+                for (productions.productions[prod_index]) |symbol| {
                     switch (symbol) {
                         .nonterminal => |nt_r| try result.uses[nt_r].append(allocator, prod_index),
                         .terminal => {},
@@ -64,9 +65,8 @@ pub const DefUse = struct {
     }
 };
 
-/// Compute if each nonterminal can derive epsilon. Relies on a valid
-/// `DefUse` of `grammar`.
-pub fn nullableAnalysis(grammar: cfg.Cfg, def_use: DefUse, allocator: std.mem.Allocator) std.mem.Allocator.Error!std.DynamicBitSetUnmanaged {
+/// Compute if each nonterminal can derive epsilon. Relies on a valid `DefUse`.
+pub fn nullableAnalysis(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, def_use: DefUse, allocator: std.mem.Allocator) std.mem.Allocator.Error!std.DynamicBitSetUnmanaged {
     // We shall use a method similar to topological sort.
     // Maintain a counter for each production, initially set to the
     // number of symbols on RHS.
@@ -74,21 +74,21 @@ pub fn nullableAnalysis(grammar: cfg.Cfg, def_use: DefUse, allocator: std.mem.Al
     //   Mark the lhs of that production as nullable
     //   For all productions that use this lhs on their rhs, subtract
     //   from their counter the number of occurrences of this lhs
-    var nullable: std.DynamicBitSetUnmanaged = try .initEmpty(allocator, grammar.nonterminals.count);
+    var nullable: std.DynamicBitSetUnmanaged = try .initEmpty(allocator, symbol_spec.nonterminals.count);
     errdefer nullable.deinit(allocator);
 
-    var count = try allocator.alloc(u32, grammar.total_productions);
+    var count = try allocator.alloc(u32, productions.total_productions);
     defer allocator.free(count);
     // Initialize count to number of symbols on RHS for each production
-    for (0..grammar.total_productions) |i| {
-        count[i] = @intCast(grammar.productions[i].len);
+    for (0..productions.total_productions) |i| {
+        count[i] = @intCast(productions.productions[i].len);
     }
 
     var work_list: std.ArrayList(u32) = .empty;
     defer work_list.deinit(allocator);
 
-    for (0..grammar.nonterminals.count) |nt| {
-        for (grammar.productionsOf(@intCast(nt))) |rhs| {
+    for (0..symbol_spec.nonterminals.count) |nt| {
+        for (productions.productionsOf(symbol_spec, @intCast(nt))) |rhs| {
             if (rhs.len == 0) {
                 nullable.set(nt);
                 try work_list.append(allocator, @intCast(nt));
@@ -99,7 +99,7 @@ pub fn nullableAnalysis(grammar: cfg.Cfg, def_use: DefUse, allocator: std.mem.Al
 
     while (work_list.pop()) |nt| {
         for (def_use.uses[nt].items) |prod_index| {
-            const lhs = grammar.production_lhs[prod_index];
+            const lhs = productions.production_lhs[prod_index];
             if (nullable.isSet(lhs)) { // Already nullable
                 continue;
             }
@@ -132,11 +132,11 @@ pub fn nullableAnalysis(grammar: cfg.Cfg, def_use: DefUse, allocator: std.mem.Al
 ///   union(union(T[x] for x in all nodes in SCC p),
 ///         union(dp(q) for q in all successor SCCs of p))
 /// Now FIRST(u) is just dp(the SCC that u is in).
-pub fn firstSet(grammar: cfg.Cfg, nullable: std.DynamicBitSetUnmanaged, allocator: std.mem.Allocator) std.mem.Allocator.Error!DpBasedSets {
-    const graph: digraph.Digraph = try .empty(grammar.nonterminals.count, allocator);
+pub fn firstSet(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, nullable: std.DynamicBitSetUnmanaged, allocator: std.mem.Allocator) std.mem.Allocator.Error!DpBasedSets {
+    const graph: digraph.Digraph = try .empty(symbol_spec.nonterminals.count, allocator);
     defer graph.free(allocator);
 
-    const T = try allocator.alloc(std.DynamicBitSetUnmanaged, grammar.nonterminals.count);
+    const T = try allocator.alloc(std.DynamicBitSetUnmanaged, symbol_spec.nonterminals.count);
     defer allocator.free(T);
     var i: u32 = 0;
     defer {
@@ -144,15 +144,15 @@ pub fn firstSet(grammar: cfg.Cfg, nullable: std.DynamicBitSetUnmanaged, allocato
             T[i - 1].deinit(allocator);
         }
     }
-    while (i < grammar.nonterminals.count) : (i += 1) {
-        T[i] = try std.DynamicBitSetUnmanaged.initEmpty(allocator, grammar.terminals.count);
+    while (i < symbol_spec.nonterminals.count) : (i += 1) {
+        T[i] = try std.DynamicBitSetUnmanaged.initEmpty(allocator, symbol_spec.terminals.count);
     }
 
-    for (0..grammar.nonterminals.count) |u| {
+    for (0..symbol_spec.nonterminals.count) |u| {
         var succ: std.ArrayList(u32) = .empty; // Successors of `u` in `graph`
         errdefer succ.deinit(allocator);
 
-        for (grammar.productionsOf(@intCast(u))) |rhs| {
+        for (productions.productionsOf(symbol_spec, @intCast(u))) |rhs| {
             for (rhs) |symbol| {
                 switch (symbol) {
                     .terminal => |tid| {
@@ -175,7 +175,7 @@ pub fn firstSet(grammar: cfg.Cfg, nullable: std.DynamicBitSetUnmanaged, allocato
     const tarjan = try graph.tarjanScc(allocator);
     errdefer tarjan.free(allocator);
 
-    const dp = try graph.reachDp(T.ptr, grammar.terminals.count, tarjan, allocator);
+    const dp = try graph.reachDp(T.ptr, symbol_spec.terminals.count, tarjan, allocator);
     return .{
         .tarjan = tarjan,
         .dp = dp,
@@ -212,11 +212,11 @@ pub const DpBasedSets = struct {
 /// union of all the FIRST sets + the terminals that should be included in
 /// FOLLOW(u) due to the above reasoning.
 /// The rest uses the same SCC + dp technique as FIRST.
-pub fn followSet(grammar: cfg.Cfg, nullable: std.DynamicBitSetUnmanaged, first_set: DpBasedSets, allocator: std.mem.Allocator) std.mem.Allocator.Error!DpBasedSets {
-    const graph: digraph.Digraph = try .empty(grammar.nonterminals.count, allocator);
+pub fn followSet(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, nullable: std.DynamicBitSetUnmanaged, first_set: DpBasedSets, allocator: std.mem.Allocator) std.mem.Allocator.Error!DpBasedSets {
+    const graph: digraph.Digraph = try .empty(symbol_spec.nonterminals.count, allocator);
     defer graph.free(allocator);
 
-    const T = try allocator.alloc(std.DynamicBitSetUnmanaged, grammar.nonterminals.count);
+    const T = try allocator.alloc(std.DynamicBitSetUnmanaged, symbol_spec.nonterminals.count);
     defer allocator.free(T);
     var i: u32 = 0;
     defer {
@@ -224,12 +224,12 @@ pub fn followSet(grammar: cfg.Cfg, nullable: std.DynamicBitSetUnmanaged, first_s
             T[i - 1].deinit(allocator);
         }
     }
-    while (i < grammar.nonterminals.count) : (i += 1) {
-        T[i] = try std.DynamicBitSetUnmanaged.initEmpty(allocator, grammar.terminals.count);
+    while (i < symbol_spec.nonterminals.count) : (i += 1) {
+        T[i] = try std.DynamicBitSetUnmanaged.initEmpty(allocator, symbol_spec.terminals.count);
     }
 
     // Adjacency list of `graph`
-    const adj = try allocator.alloc(std.ArrayList(u32), grammar.nonterminals.count);
+    const adj = try allocator.alloc(std.ArrayList(u32), symbol_spec.nonterminals.count);
     defer allocator.free(adj);
     var j: u32 = 0;
     defer {
@@ -237,15 +237,15 @@ pub fn followSet(grammar: cfg.Cfg, nullable: std.DynamicBitSetUnmanaged, first_s
             adj[j - 1].deinit(allocator);
         }
     }
-    while (j < grammar.nonterminals.count) : (j += 1) {
+    while (j < symbol_spec.nonterminals.count) : (j += 1) {
         adj[j] = .empty;
     }
 
     // End of Input can follow entry nt by the augmented production
-    T[grammar.nonterminals.entry].set(grammar.terminals.eoi);
+    T[symbol_spec.nonterminals.entry].set(symbol_spec.terminals.eoi);
 
-    for (0..grammar.nonterminals.count) |u| {
-        for (grammar.productionsOf(@intCast(u))) |rhs| {
+    for (0..symbol_spec.nonterminals.count) |u| {
+        for (productions.productionsOf(symbol_spec, @intCast(u))) |rhs| {
             if (rhs.len == 0) {
                 // Empty production does not contribute; necessary to
                 // avoid unsigned int overflow
@@ -254,7 +254,7 @@ pub fn followSet(grammar: cfg.Cfg, nullable: std.DynamicBitSetUnmanaged, first_s
 
             // For a single production, we have to work backwards to
             // ensure only one linear scan is done.
-            var running: std.DynamicBitSetUnmanaged = try .initEmpty(allocator, grammar.terminals.count);
+            var running: std.DynamicBitSetUnmanaged = try .initEmpty(allocator, symbol_spec.terminals.count);
             defer running.deinit(allocator);
 
             var k = rhs.len - 1;
@@ -304,7 +304,7 @@ pub fn followSet(grammar: cfg.Cfg, nullable: std.DynamicBitSetUnmanaged, first_s
     const tarjan = try graph.tarjanScc(allocator);
     errdefer tarjan.free(allocator);
 
-    const dp = try graph.reachDp(T.ptr, grammar.terminals.count, tarjan, allocator);
+    const dp = try graph.reachDp(T.ptr, symbol_spec.terminals.count, tarjan, allocator);
     return .{
         .tarjan = tarjan,
         .dp = dp,
@@ -329,7 +329,7 @@ pub const Action = union(enum) {
 /// An LR(0) item -- a production with a dot.
 /// **Always be careful if you are handling the augmented production.**
 pub const Item = struct {
-    /// Production ID. This is an index into cfg.Cfg.productions, or
+    /// Production ID. This is an index into `cfg.CfgProductions.productions`, or
     /// the augmented production "S' -> S $" if equal to `augmented_production`.
     production: u32,
     /// Dot position (before i-th symbol of rhs, or at the end if i = rhs.len)
@@ -383,10 +383,10 @@ pub const ItemSetHashContext = struct {
 ///   closure = core_set U {nt -> . rhs | all nt -> rhs, return.isSet(nt)}.
 /// Closure definition: initialize closure = core, then add in "X -> . alpha"
 /// to the set if there is an item of the form "Y -> beta . X gamma".
-/// Let `G` be `firstGraph(grammar, ...)`. `tarjan` must be `G.tarjanScc(...)`.
+/// Let `G` be `firstGraph(...)`. `tarjan` must be `G.tarjanScc(...)`.
 /// `first_reachability` must be `G.reachability(tarjan, ...)`.
-pub fn reachableNtsAfterDot(grammar: cfg.Cfg, tarjan: digraph.TarjanSccResult, first_reachability: digraph.ReachDpResult, core_set: []const Item, allocator: std.mem.Allocator) std.mem.Allocator.Error!std.DynamicBitSetUnmanaged {
-    var ans: std.DynamicBitSetUnmanaged = try .initEmpty(allocator, grammar.nonterminals.count);
+pub fn reachableNtsAfterDot(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, tarjan: digraph.TarjanSccResult, first_reachability: digraph.ReachDpResult, core_set: []const Item, allocator: std.mem.Allocator) std.mem.Allocator.Error!std.DynamicBitSetUnmanaged {
+    var ans: std.DynamicBitSetUnmanaged = try .initEmpty(allocator, symbol_spec.nonterminals.count);
     errdefer ans.deinit(allocator);
 
     for (core_set) |item| {
@@ -394,10 +394,10 @@ pub fn reachableNtsAfterDot(grammar: cfg.Cfg, tarjan: digraph.TarjanSccResult, f
         if (item.production == Item.augmented_production) { // S' -> S $
             @branchHint(.unlikely);
             if (item.dot == 0) {
-                nt = grammar.nonterminals.entry;
+                nt = symbol_spec.nonterminals.entry;
             }
         } else {
-            const rhs = grammar.productions[item.production];
+            const rhs = productions.productions[item.production];
             if (item.dot < rhs.len) {
                 switch (rhs[item.dot]) {
                     .nonterminal => |x| nt = x,
@@ -462,7 +462,7 @@ const DfaNeighborMap = struct {
 ///
 /// Backend must implement the following methods (`self: *Backend` omitted):
 /// ```
-/// fn beginTableGen(grammar: *const cfg.Cfg, states: *const std.ArrayList([]Item), allocator: std.mem.Allocator) E!void
+/// fn beginTableGen(symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, states: *const std.ArrayList([]Item), allocator: std.mem.Allocator) E!void
 /// fn beginState() E!void
 /// fn acceptOnEoi() E!void
 /// fn reduce(production: u32) E!void
@@ -489,7 +489,7 @@ const DfaNeighborMap = struct {
 /// - Nonterminals in calls to `goto` are all distinct
 /// - Terminals in calls to `shift` are all distinct
 /// - Production IDs in calls to `reduce` are all distinct
-pub fn lr0(grammar: cfg.Cfg, tarjan: digraph.TarjanSccResult, first_reachability: digraph.ReachDpResult, comptime Backend: type, backend: *Backend, allocator: std.mem.Allocator) (Backend.Error || std.mem.Allocator.Error)!void {
+pub fn lr0(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, tarjan: digraph.TarjanSccResult, first_reachability: digraph.ReachDpResult, comptime Backend: type, backend: *Backend, allocator: std.mem.Allocator) (Backend.Error || std.mem.Allocator.Error)!void {
     // States are never removed from `states_map`, so use arena for allocating
     // core item sets.
     var arena: std.heap.ArenaAllocator = .init(allocator);
@@ -510,7 +510,7 @@ pub fn lr0(grammar: cfg.Cfg, tarjan: digraph.TarjanSccResult, first_reachability
     try states_map.putNoClobber(allocator, entry_item, 0);
     try states.append(allocator, entry_item);
 
-    try backend.beginTableGen(&grammar, &states, allocator);
+    try backend.beginTableGen(&symbol_spec, &productions, &states, allocator);
 
     // The "work list" always consists of states labelled from `state` to
     // `total_state-1` (inclusive). For each state in work list, we find the
@@ -533,7 +533,7 @@ pub fn lr0(grammar: cfg.Cfg, tarjan: digraph.TarjanSccResult, first_reachability
                 // S' -> S $
                 switch (core_item.dot) {
                     0 => {
-                        try neighbor_goto.addCoreItem(allocator, grammar.nonterminals.entry, Item{
+                        try neighbor_goto.addCoreItem(allocator, symbol_spec.nonterminals.entry, Item{
                             .production = Item.augmented_production,
                             .dot = 1,
                         });
@@ -546,7 +546,7 @@ pub fn lr0(grammar: cfg.Cfg, tarjan: digraph.TarjanSccResult, first_reachability
                 }
             } else {
                 std.debug.assert(core_item.dot != 0);
-                const rhs = grammar.productions[core_item.production];
+                const rhs = productions.productions[core_item.production];
                 if (core_item.dot == rhs.len) {
                     try backend.reduce(core_item.production);
                 } else {
@@ -564,13 +564,13 @@ pub fn lr0(grammar: cfg.Cfg, tarjan: digraph.TarjanSccResult, first_reachability
 
         // Iterate through the rest of closure set, i.e. closure items that are
         // not in core set.
-        var nts_after_dot = try reachableNtsAfterDot(grammar, tarjan, first_reachability, core_set, allocator);
+        var nts_after_dot = try reachableNtsAfterDot(symbol_spec, productions, tarjan, first_reachability, core_set, allocator);
         defer nts_after_dot.deinit(allocator);
         var nt_it = nts_after_dot.iterator(.{});
         while (nt_it.next()) |nt| {
-            for (grammar.production_pact[nt]..grammar.productionEndIndexOf(@intCast(nt))) |prod_id| {
+            for (productions.production_pact[nt]..productions.productionEndIndexOf(symbol_spec, @intCast(nt))) |prod_id| {
                 // Dot is at position 0
-                const rhs = grammar.productions[prod_id];
+                const rhs = productions.productions[prod_id];
                 if (rhs.len == 0) {
                     try backend.reduce(@as(u32, @intCast(prod_id)));
                 } else {
@@ -626,7 +626,8 @@ pub fn lr0(grammar: cfg.Cfg, tarjan: digraph.TarjanSccResult, first_reachability
 /// Convenient data structure manager.
 pub const DataStructures = struct {
     allocator: std.mem.Allocator,
-    grammar: cfg.Cfg,
+    symbol_spec: sym.SymbolSpec,
+    productions: cfg.CfgProductions,
 
     first_graph: ?digraph.Digraph = null,
     first_tarjan: ?digraph.TarjanSccResult = null,
@@ -649,7 +650,7 @@ pub const DataStructures = struct {
     pub fn getFirstGraph(self: *@This()) std.mem.Allocator.Error!digraph.Digraph {
         if (self.first_graph) |f|
             return f;
-        const f = try firstGraph(self.grammar, self.allocator);
+        const f = try firstGraph(self.symbol_spec, self.productions, self.allocator);
         self.first_graph = f;
         return f;
     }
@@ -673,7 +674,7 @@ pub const DataStructures = struct {
     pub fn getDefUse(self: *@This()) std.mem.Allocator.Error!DefUse {
         if (self.def_use) |du|
             return du;
-        const du = try DefUse.fromCfg(self.grammar, self.allocator);
+        const du = try DefUse.fromCfg(self.symbol_spec, self.productions, self.allocator);
         self.def_use = du;
         return du;
     }
@@ -681,7 +682,7 @@ pub const DataStructures = struct {
     pub fn getNullable(self: *@This()) std.mem.Allocator.Error!std.DynamicBitSetUnmanaged {
         if (self.nullable) |n|
             return n;
-        const n = try nullableAnalysis(self.grammar, try self.getDefUse(), self.allocator);
+        const n = try nullableAnalysis(self.symbol_spec, self.productions, try self.getDefUse(), self.allocator);
         self.nullable = n;
         return n;
     }
@@ -689,7 +690,7 @@ pub const DataStructures = struct {
     pub fn getFirstSet(self: *@This()) std.mem.Allocator.Error!DpBasedSets {
         if (self.first_set) |fs|
             return fs;
-        const fs = try firstSet(self.grammar, try self.getNullable(), self.allocator);
+        const fs = try firstSet(self.symbol_spec, self.productions, try self.getNullable(), self.allocator);
         self.first_set = fs;
         return fs;
     }
@@ -697,7 +698,7 @@ pub const DataStructures = struct {
     pub fn getFollowSet(self: *@This()) std.mem.Allocator.Error!DpBasedSets {
         if (self.follow_set) |fs|
             return fs;
-        const fs = try followSet(self.grammar, try self.getNullable(), try self.getFirstSet(), self.allocator);
+        const fs = try followSet(self.symbol_spec, self.productions, try self.getNullable(), try self.getFirstSet(), self.allocator);
         self.follow_set = fs;
         return fs;
     }

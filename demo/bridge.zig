@@ -149,10 +149,13 @@ export fn pgenParse(
     };
     defer symbol_spec.deinit(gpa);
     defer cfg_managed.deinit();
-    const cfg = cfg_managed.cfg;
 
     // Currently just enable SLR backend.
-    var ds: pgen.lr0.DataStructures = .{ .allocator = gpa, .grammar = cfg };
+    var ds: pgen.lr0.DataStructures = .{
+        .allocator = gpa,
+        .symbol_spec = cfg_managed.symbol_spec,
+        .productions = cfg_managed.productions,
+    };
     defer ds.deinit();
     const tarjan = ds.getFirstTarjan() catch {
         report.addError("OOM (FIRST graph Tarjan)", .{});
@@ -183,14 +186,16 @@ export fn pgenParse(
         },
         .follow_sets = &follow_set,
         .action_handler = .{
-            .grammar = &cfg,
+            .symbol_spec = &cfg_managed.symbol_spec,
+            .productions = &cfg_managed.productions,
             .conflict_resolver = {},
         },
         .goto_handler = .{},
     };
     defer backend.free();
     pgen.lr0.lr0(
-        cfg,
+        cfg_managed.symbol_spec,
+        cfg_managed.productions,
         tarjan,
         first_reachability,
         @TypeOf(backend),
