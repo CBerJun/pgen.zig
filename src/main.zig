@@ -284,19 +284,21 @@ pub fn main(init: std.process.Init) u8 {
     }
     var cst = parser.retrieve();
     defer cst.deinit(gpa);
-    var ast = pgen.cst2ast.EbnfManaged.fromCst(cst, gpa, gpa, &aggregator) catch |err| {
-        switch (err) {
-            error.OutOfMemory => logger.writeLine("OOM (CST to AST)"),
-            error.Cst2AstSemanticError => logger.writeLine("CST to AST failed"), // Details logged by aggregator
-        }
-        return 1;
+    var cfg_managed, var symbol_spec = blk: {
+        var ast = pgen.cst2ast.EbnfManaged.fromCst(cst, gpa, gpa, &aggregator) catch |err| {
+            switch (err) {
+                error.OutOfMemory => logger.writeLine("OOM (CST to AST)"),
+                error.Cst2AstSemanticError => logger.writeLine("CST to AST failed"), // Details logged by aggregator
+            }
+            return 1;
+        };
+        defer ast.deinit();
+        break :blk .{ pgen.ast2cfg.CfgManaged.fromAst(ast.symbol_spec, ast.productions, &ast.pool, gpa, gpa) catch {
+            logger.writeLine("OOM (AST to CFG)");
+            return 1;
+        }, ast.ownedSymbolSpec() };
     };
-    defer ast.deinit();
-    // XXX: `cfg` does borrow from `ast`-owned memory. See core/ast2cfg.zig
-    var cfg_managed = pgen.ast2cfg.CfgManaged.fromAst(ast.ebnf, &ast.pool, gpa, gpa) catch {
-        logger.writeLine("OOM (AST to CFG)");
-        return 1;
-    };
+    defer symbol_spec.deinit(gpa);
     defer cfg_managed.deinit();
     const cfg = cfg_managed.cfg;
 

@@ -7,31 +7,86 @@ const diagnostic = pgen_core.diagnostic;
 
 /// Managed `ast.Ebnf` with an arena allocator and `ExprPool` which holds
 /// the rhs EBNF nodes. This won't work if you have multiple `ast.Ebnf`s
-/// sharing a pool.
+/// sharing a pool. The allocation is split into two allocators since the
+/// AST-to-CFG stage may reuse `Nonterminals` and `Terminals` objects for
+/// CFG.
 pub const EbnfManaged = struct {
-    /// The unmanaged `ast.Ebnf`.
-    ebnf: ast.Ebnf,
-    /// The arena from which all memory owned by `ebnf` and `pool` is
-    /// allocated from.
-    arena: std.heap.ArenaAllocator,
+    symbol_spec: ast.SymbolSpec,
+    productions: ast.EbnfProductions,
     /// The pool from which all `Expr`s in `productions` are interned.
     pool: ast.ExprPool,
+    /// The arena for `productions` and `pool`.
+    expr_arena: ?*std.heap.ArenaAllocator,
+    /// The arena for `symbol_spec`.
+    symbol_arena: ?*std.heap.ArenaAllocator,
+    /// The allocator owning the arena themselves.
+    allocator: std.mem.Allocator,
+
+    pub const SymbolSpecManaged = struct {
+        symbol_spec: ast.SymbolSpec,
+        arena: *std.heap.ArenaAllocator,
+
+        /// Use the same allocator as `EbnfManaged`'s `allocator`.
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            self.arena.deinit();
+            allocator.destroy(self.arena);
+            self.* = undefined;
+        }
+    };
 
     pub fn fromCst(cst: psr.CstNode, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator, aggregator: *diagnostic.Aggregator) (SemanticError || std.mem.Allocator.Error)!@This() {
-        var arena: std.heap.ArenaAllocator = .init(allocator);
-        errdefer arena.deinit();
-        const arena_allocator = arena.allocator();
-        var pool: ast.ExprPool = .init(arena_allocator);
+        var expr_arena = try allocator.create(std.heap.ArenaAllocator);
+        expr_arena.* = .init(allocator);
+        errdefer {
+            expr_arena.deinit();
+            allocator.destroy(expr_arena);
+        }
+        var symbol_arena = try allocator.create(std.heap.ArenaAllocator);
+        symbol_arena.* = .init(allocator);
+        errdefer {
+            symbol_arena.deinit();
+            allocator.destroy(symbol_arena);
+        }
+        const expr_allocator = expr_arena.allocator();
+        var pool: ast.ExprPool = .init(expr_allocator);
+        errdefer pool.deinit(); // In fact unnecessary
+        const symbol_spec, const productions = try cstToEbnf(cst, &pool, expr_allocator, symbol_arena.allocator(), scrap_allocator, aggregator);
         return .{
-            .ebnf = try cstToEbnf(cst, &pool, arena_allocator, scrap_allocator, aggregator),
-            .arena = arena,
+            .symbol_spec = symbol_spec,
+            .productions = productions,
+            .expr_arena = expr_arena,
+            .symbol_arena = symbol_arena,
             .pool = pool,
+            .allocator = allocator,
         };
     }
 
+    /// Destroys `productions` and `pool`.
+    pub fn deinitExpr(self: *@This()) void {
+        if (self.expr_arena) |arena| {
+            self.pool.deinit(); // In fact unnecessary
+            arena.deinit();
+            self.allocator.destroy(arena);
+            self.expr_arena = null;
+            self.productions = undefined;
+        }
+    }
+
+    /// Transfer `symbol_spec`'s ownership.
+    pub fn ownedSymbolSpec(self: *@This()) SymbolSpecManaged {
+        defer {
+            self.symbol_arena = null;
+            self.symbol_spec = undefined;
+        }
+        return .{ .arena = self.symbol_arena.?, .symbol_spec = self.symbol_spec };
+    }
+
     pub fn deinit(self: *@This()) void {
-        self.pool.deinit(); // In fact unnecessary
-        self.arena.deinit();
+        self.deinitExpr();
+        if (self.symbol_arena) |arena| {
+            arena.deinit();
+            self.allocator.destroy(arena);
+        }
         self.* = undefined;
     }
 };
@@ -40,18 +95,18 @@ pub const SemanticError = error{
     Cst2AstSemanticError,
 };
 
-/// Convert grammar CST to intermediate EBNF form, allocating memory for
-/// the `ast.Ebnf` using `allocator`. Memory owned by CST (including tokens)
-/// are not freed or reused. It is OK and encouraged to pass in an arena
-/// allocator for `allocator`, as all memory owned by `ast.Ebnf` probably share
-/// the same lifespan; just remember to deinit arena on error. Do not pass in
-/// an arena for `scrap_allocator`. On error, it is not possible to remove
-/// already-interned expressions in `pool`.
-pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator, aggregator: *diagnostic.Aggregator) (SemanticError || std.mem.Allocator.Error)!ast.Ebnf {
+/// Convert grammar CST to intermediate EBNF form, allocating memory using
+/// `expr_allocator` (for `EbnfProductions`) and `symbol_allocator`
+/// (for `SymbolSpec`). Memory owned by CST (including tokens) are not freed
+/// or reused. It is OK and encouraged to pass in an arena allocator for
+/// `expr_allocator` or `symbol_allocator`. Do not pass in an arena for
+/// `scrap_allocator`. On error, it is not possible to remove already-interned
+/// expressions in `pool`.
+pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.Allocator, symbol_allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator, aggregator: *diagnostic.Aggregator) (SemanticError || std.mem.Allocator.Error)!struct { ast.SymbolSpec, ast.EbnfProductions } {
     // Pass 1: Collect terminals and nonterminals
     var named_terminals_map: std.StringHashMapUnmanaged(u32) = .empty;
     defer named_terminals_map.deinit(scrap_allocator); // Strings are borrowed
-    var literal_terminals_map: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(u32)) = .empty;
+    var literal_terminals_map: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(u32)) = .empty; // {suffix: {content: id}}
     defer {
         var it = literal_terminals_map.valueIterator();
         while (it.next()) |m|
@@ -221,13 +276,13 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
     }
     const nonterminal_count = nonterminals_map.size;
     // Label nonterminals
-    var node_forming_nt_names = try allocator.alloc([]u8, node_forming_nt_count);
+    var node_forming_nt_names = try symbol_allocator.alloc([]u8, node_forming_nt_count);
     // Fill with empty slice to allow errdefer to clean up.
     @memset(node_forming_nt_names, &[0]u8{});
     errdefer {
         for (node_forming_nt_names) |name|
-            allocator.free(name);
-        allocator.free(node_forming_nt_names);
+            symbol_allocator.free(name);
+        symbol_allocator.free(node_forming_nt_names);
     }
     {
         var ids: [2]u32 = .{ 0, node_forming_nt_count };
@@ -239,7 +294,7 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
             const id = id_ptr.*;
             entry.value_ptr.* = id;
             if (id < node_forming_nt_count) {
-                node_forming_nt_names[id] = try allocator.dupe(u8, entry.key_ptr.*);
+                node_forming_nt_names[id] = try symbol_allocator.dupe(u8, entry.key_ptr.*);
             }
             id_ptr.* += 1;
         }
@@ -257,36 +312,36 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
     };
     // Label literal terminals
     var terminal_id: u32 = 0;
-    var literal_collections = try allocator.alloc(cfg.LiteralCollection, literal_terminals_map.size);
+    var literal_collections = try symbol_allocator.alloc(cfg.LiteralCollection, literal_terminals_map.size);
     var literal_terminal_i: u32 = 0;
     errdefer {
         for (literal_collections[0..literal_terminal_i]) |collection| {
             // `collection` must be a completely-built collection
-            allocator.free(collection.suffix);
+            symbol_allocator.free(collection.suffix);
             for (collection.literals) |literal|
-                allocator.free(literal);
-            allocator.free(collection.literals);
+                symbol_allocator.free(literal);
+            symbol_allocator.free(collection.literals);
         }
-        allocator.free(literal_collections);
+        symbol_allocator.free(literal_collections);
     }
     {
         var it = literal_terminals_map.iterator();
         while (it.next()) |entry| {
             const collection = &literal_collections[literal_terminal_i];
-            collection.suffix = try allocator.dupe(u8, entry.key_ptr.*);
-            errdefer allocator.free(collection.suffix);
+            collection.suffix = try symbol_allocator.dupe(u8, entry.key_ptr.*);
+            errdefer symbol_allocator.free(collection.suffix);
             const map = entry.value_ptr.*;
-            const literals = try allocator.alloc([]u8, map.size);
+            const literals = try symbol_allocator.alloc([]u8, map.size);
             collection.literals = literals;
             var literal_terminal_j: u32 = 0;
             errdefer {
                 for (literals[0..literal_terminal_j]) |literal|
-                    allocator.free(literal);
-                allocator.free(literals);
+                    symbol_allocator.free(literal);
+                symbol_allocator.free(literals);
             }
             var it2 = map.iterator();
             while (it2.next()) |entry2| {
-                literals[literal_terminal_j] = try allocator.dupe(u8, entry2.key_ptr.*);
+                literals[literal_terminal_j] = try symbol_allocator.dupe(u8, entry2.key_ptr.*);
                 literal_terminal_j += 1;
                 entry2.value_ptr.* = terminal_id;
                 terminal_id += 1;
@@ -295,25 +350,25 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
         }
     }
     // Label named terminals
-    const named_terminals = try allocator.alloc([]u8, named_terminals_map.size);
+    const named_terminals = try symbol_allocator.alloc([]u8, named_terminals_map.size);
     var named_terminals_i: u32 = 0;
     errdefer {
         for (named_terminals[0..named_terminals_i]) |slice|
-            allocator.free(slice);
-        allocator.free(named_terminals);
+            symbol_allocator.free(slice);
+        symbol_allocator.free(named_terminals);
     }
     {
         var it = named_terminals_map.iterator();
         while (it.next()) |entry| {
-            named_terminals[named_terminals_i] = try allocator.dupe(u8, entry.key_ptr.*);
+            named_terminals[named_terminals_i] = try symbol_allocator.dupe(u8, entry.key_ptr.*);
             named_terminals_i += 1;
             entry.value_ptr.* = terminal_id;
             terminal_id += 1;
         }
     }
     // Pass 2: Productions
-    var productions = try allocator.alloc(*const ast.Expr, nonterminal_count);
-    errdefer allocator.free(productions);
+    var productions = try expr_allocator.alloc(*const ast.Expr, nonterminal_count);
+    errdefer expr_allocator.free(productions);
     grammar_it.loadState(grammar_it_production_start);
     const converter: CstRhsToAst = .{
         .named_terminals_map = &named_terminals_map,
@@ -335,7 +390,7 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
         const nt = nonterminals_map.get(nt_string).?;
         productions[nt] = try converter.rhs(rhs);
     }
-    return .{
+    return .{ ast.SymbolSpec{
         .terminals = .{
             .eoi = terminal_id,
             .count = terminal_id + 1,
@@ -348,8 +403,7 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, allocator: std.mem.Alloc
             .node_forming_count = node_forming_nt_count,
             .names = node_forming_nt_names.ptr,
         },
-        .productions = productions.ptr,
-    };
+    }, productions.ptr };
 }
 
 /// Convenience function for `cstToEbnf`.
@@ -376,7 +430,7 @@ const CstRhsToAst = struct {
     pub const Error = std.mem.Allocator.Error || SemanticError;
 
     pub fn rhs(self: @This(), node: psr.NonterminalExpansion) Error!*const ast.Expr {
-        const n_operands = (node.children.len + 1) >> 1;
+        const n_operands = @shrExact(node.children.len + 1, 1);
         var operands = try self.pool.allocator.alloc(*const ast.Expr, n_operands);
         var i: usize = 1;
         defer if (i < n_operands) self.pool.allocator.free(operands);

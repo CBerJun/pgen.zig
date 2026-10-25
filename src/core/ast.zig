@@ -383,17 +383,20 @@ pub const ExprPool = struct {
     }
 };
 
-/// Intermediate form of grammar, still in EBNF style.
-pub const Ebnf = struct {
+pub const SymbolSpec = struct {
     /// Labelling of terminals. This will pass down as is to the `cfg.Cfg`
-    /// object. Thus, the terminal labelling is the same between an `Ebnf`
-    /// and the corresponding `cfg.Cfg`.
+    /// object.
     terminals: cfg.Terminals,
     /// Labelling of nonterminals. This will pass down to the `cfg.Cfg` object
     /// but auxiliary nonterminals may be added during EBNF-to-CFG. Those aux
     /// nts always use new IDs and so existing nts' IDs won't change.
     nonterminals: cfg.Nonterminals,
-    /// The EBNF production associated with each nt. Length is
-    /// `nonterminals.count`.
-    productions: [*]*const Expr,
 };
+
+/// The EBNF production associated with each nt. Length is
+/// the corresponding `SymbolSpec`'s `nonterminals.count`.
+pub const EbnfProductions = [*]*const Expr;
+
+// Together, `SymbolSpec` and `EbnfProductions` serve as an intermediate form
+// of grammar, in EBNF style. They are separate since they have different
+// lifetime during compilation.

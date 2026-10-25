@@ -131,21 +131,23 @@ export fn pgenParse(
     }
     var cst = parser.retrieve();
     defer cst.deinit(gpa);
-    var ast = pgen.cst2ast.EbnfManaged.fromCst(cst, gpa, gpa, &aggregator) catch |err| switch (err) {
-        error.OutOfMemory => {
-            report.addError("OOM (CST to AST)\n", .{});
+    var cfg_managed, var symbol_spec = blk: {
+        var ast = pgen.cst2ast.EbnfManaged.fromCst(cst, gpa, gpa, &aggregator) catch |err| {
+            switch (err) {
+                error.OutOfMemory => report.addError("OOM (CST to AST)\n", .{}),
+                error.Cst2AstSemanticError => {
+                    // Details logged by aggregator.
+                },
+            }
             return;
-        },
-        error.Cst2AstSemanticError => {
-            // Details logged by aggregator.
+        };
+        defer ast.deinit();
+        break :blk .{ pgen.ast2cfg.CfgManaged.fromAst(ast.symbol_spec, ast.productions, &ast.pool, gpa, gpa) catch {
+            report.addError("OOM (AST to CFG)", .{});
             return;
-        },
+        }, ast.ownedSymbolSpec() };
     };
-    defer ast.deinit();
-    var cfg_managed = pgen.ast2cfg.CfgManaged.fromAst(ast.ebnf, &ast.pool, gpa, gpa) catch {
-        report.addError("OOM (AST to CFG)", .{});
-        return;
-    };
+    defer symbol_spec.deinit(gpa);
     defer cfg_managed.deinit();
     const cfg = cfg_managed.cfg;
 

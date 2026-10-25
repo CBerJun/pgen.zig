@@ -41,10 +41,10 @@ pub const CfgManaged = struct {
     cfg: cfg.Cfg,
     arena: std.heap.ArenaAllocator,
 
-    pub fn fromAst(ebnf: ast.Ebnf, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
+    pub fn fromAst(symbol_spec: ast.SymbolSpec, productions: ast.EbnfProductions, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         return .{
-            .cfg = try astToCfg(ebnf, pool, arena.allocator(), scrap_allocator),
+            .cfg = try astToCfg(symbol_spec, productions, pool, arena.allocator(), scrap_allocator),
             .arena = arena,
         };
     }
@@ -57,8 +57,10 @@ pub const CfgManaged = struct {
 
 /// Converts AST to CFG.
 const AstToCfg = struct {
-    ebnf: ast.Ebnf,
+    symbol_spec: ast.SymbolSpec,
+    productions: ast.EbnfProductions,
     pool: *ast.ExprPool,
+
     allocator: std.mem.Allocator,
     scrap_allocator: std.mem.Allocator,
     epoch: u32,
@@ -79,14 +81,15 @@ const AstToCfg = struct {
         target: u32,
     };
 
-    pub fn init(ebnf: ast.Ebnf, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) @This() {
+    pub fn init(symbol_spec: ast.SymbolSpec, productions: ast.EbnfProductions, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) @This() {
         return .{
-            .ebnf = ebnf,
+            .symbol_spec = symbol_spec,
+            .productions = productions,
             .pool = pool,
             .allocator = allocator,
             .scrap_allocator = scrap_allocator,
             .epoch = pool.obtainEpoch(),
-            .aux_nt = ebnf.nonterminals.count,
+            .aux_nt = symbol_spec.nonterminals.count,
             .pm = .{ .allocator = allocator },
             .stack = .empty,
         };
@@ -104,7 +107,7 @@ const AstToCfg = struct {
             i: usize,
         }) = .empty;
         defer stack.deinit(self.scrap_allocator);
-        for (self.ebnf.productions[0..self.ebnf.nonterminals.count]) |rhs| {
+        for (self.productions[0..self.symbol_spec.nonterminals.count]) |rhs| {
             try stack.append(self.scrap_allocator, .{ .expr = rhs, .i = 0 });
             while (stack.pop()) |frame| {
                 const entry = self.pool.getEntry(frame.expr);
@@ -132,8 +135,8 @@ const AstToCfg = struct {
 
     /// Pass 2: actually convert
     pub fn pass2(self: *@This()) std.mem.Allocator.Error!void {
-        for (0..self.ebnf.nonterminals.count) |lhs| {
-            try self.processEbnfProduction(@intCast(lhs), self.ebnf.productions[lhs]);
+        for (0..self.symbol_spec.nonterminals.count) |lhs| {
+            try self.processEbnfProduction(@intCast(lhs), self.productions[lhs]);
         }
     }
 
@@ -314,7 +317,6 @@ const AstToCfg = struct {
     }
 
     /// Lastly, sort production list and generate the pact representation.
-    /// Note we borrow `ebnf.terminals` and `ebnf.nonterminals.names`.
     pub fn getResult(self: *@This()) std.mem.Allocator.Error!cfg.Cfg {
         const productions = try self.pm.productions.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(productions);
@@ -351,12 +353,12 @@ const AstToCfg = struct {
         }
 
         return .{
-            .terminals = self.ebnf.terminals,
+            .terminals = self.symbol_spec.terminals,
             .nonterminals = .{
-                .entry = self.ebnf.nonterminals.entry,
+                .entry = self.symbol_spec.nonterminals.entry,
                 .count = self.aux_nt,
-                .node_forming_count = self.ebnf.nonterminals.node_forming_count,
-                .names = self.ebnf.nonterminals.names,
+                .node_forming_count = self.symbol_spec.nonterminals.node_forming_count,
+                .names = self.symbol_spec.nonterminals.names,
             },
             .total_productions = total_productions,
             .productions = productions.ptr,
@@ -396,10 +398,9 @@ const ProductionsManager = struct {
 };
 
 /// This mutates states in the `pool`'s entries, so it is not safe for
-/// concurrent use. THE RESULT'S `.terminals` and `.nonterminals.names` are
-/// borrowed from `ebnf.terminals`.
-pub fn astToCfg(ebnf: ast.Ebnf, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!cfg.Cfg {
-    var ast2cfg: AstToCfg = .init(ebnf, pool, allocator, scrap_allocator);
+/// concurrent use.
+pub fn astToCfg(symbol_spec: ast.SymbolSpec, productions: ast.EbnfProductions, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!cfg.Cfg {
+    var ast2cfg: AstToCfg = .init(symbol_spec, productions, pool, allocator, scrap_allocator);
     defer ast2cfg.deinit();
     try ast2cfg.pass1();
     try ast2cfg.pass2();
