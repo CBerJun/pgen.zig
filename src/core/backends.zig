@@ -329,8 +329,8 @@ const ZigEmitter = struct {
     }
 
     pub fn writeReduceCall(self: @This(), symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, prod_id: u32) std.Io.Writer.Error!void {
-        const rhs_len = productions.productions[prod_id].len;
-        const lhs = productions.production_lhs[prod_id];
+        const rhs_len = productions.rhs[prod_id].len;
+        const lhs = productions.lhs[prod_id];
         try self.out.print("self.reduce(allocator, {}, {}, {s})", .{
             rhs_len,
             lhs,
@@ -674,7 +674,7 @@ pub fn ZigSwitchActionHandler(comptime ConflictResolver: type) type {
                 var resolved = false;
                 if (ConflictResolver != void) {
                     const reduce_prod = gop.value_ptr.*.reduce;
-                    if (self.conflict_resolver.resolveShiftReduce(terminal, self.productions.production_lhs[reduce_prod])) |x| {
+                    if (self.conflict_resolver.resolveShiftReduce(terminal, self.productions.lhs[reduce_prod])) |x| {
                         resolved = true;
                         switch (x) {
                             .shift => {},
@@ -702,7 +702,7 @@ pub fn ZigSwitchActionHandler(comptime ConflictResolver: type) type {
                 if (ConflictResolver != void) {
                     switch (gop.value_ptr.*) {
                         .shift => {
-                            if (self.conflict_resolver.resolveShiftReduce(terminal, self.productions.production_lhs[production])) |x| {
+                            if (self.conflict_resolver.resolveShiftReduce(terminal, self.productions.lhs[production])) |x| {
                                 resolved = true;
                                 switch (x) {
                                     .shift => replace = false,
@@ -711,7 +711,7 @@ pub fn ZigSwitchActionHandler(comptime ConflictResolver: type) type {
                             }
                         },
                         .reduce => |old_prod| {
-                            if (self.conflict_resolver.resolveReduceReduce(self.productions.production_lhs[old_prod], self.productions.production_lhs[production])) |which| {
+                            if (self.conflict_resolver.resolveReduceReduce(self.productions.lhs[old_prod], self.productions.lhs[production])) |which| {
                                 resolved = true;
                                 replace = which == 1;
                             }
@@ -877,7 +877,7 @@ pub fn SlrBackend(comptime ActionHandler: type, comptime GotoHandler: type) type
             };
         }
         pub fn reduce(self: *@This(), production: u32) Error!void {
-            const nt = self.productions.production_lhs[production];
+            const nt = self.productions.lhs[production];
             const follow = self.follow_sets.get(nt);
             // Only reduce if lookahead token is in FOLLOW set of `nt`.
             var it = follow.iterator(.{});

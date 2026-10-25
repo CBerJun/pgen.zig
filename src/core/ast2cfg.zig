@@ -375,10 +375,10 @@ const AstToCfg = struct {
                 .names = self.symbol_spec.nonterminals.names,
             },
         }, cfg.CfgProductions{
-            .total_productions = total_productions,
-            .productions = productions.ptr,
-            .production_lhs = production_lhs.ptr,
-            .production_pact = production_pact.ptr,
+            .count = total_productions,
+            .rhs = productions.ptr,
+            .lhs = production_lhs.ptr,
+            .pact = production_pact.ptr,
         } };
     }
 };

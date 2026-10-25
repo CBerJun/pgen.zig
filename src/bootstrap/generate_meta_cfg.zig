@@ -185,8 +185,8 @@ pub fn main(init: std.process.Init) !void {
         \\}},
         \\}};
         \\pub const meta_productions: cfg.CfgProductions = .{{
-        \\.total_productions = {},
-        \\.production_lhs = &[_]u32{{
+        \\.count = {},
+        \\.lhs = &[_]u32{{
     , .{ enumSize(Nt), total_nts, pm.n_prods }); // End .nonterminals
     for (pm.l.items, 0..) |all_rhs, i| {
         for (0..all_rhs.items.len) |_| {
@@ -195,7 +195,7 @@ pub fn main(init: std.process.Init) !void {
     }
     try writer.writeAll(
         \\},
-        \\.production_pact = &[_]u32{
+        \\.pact = &[_]u32{
     );
     {
         var i: u32 = 0;
@@ -206,7 +206,7 @@ pub fn main(init: std.process.Init) !void {
     }
     try writer.writeAll(
         \\},
-        \\.productions = &[_][]const cfg.Symbol{
+        \\.rhs = &[_][]const cfg.Symbol{
     );
     for (pm.l.items) |all_rhs| {
         for (all_rhs.items) |rhs| {
@@ -218,7 +218,7 @@ pub fn main(init: std.process.Init) !void {
             try writer.writeAll("},");
         }
     }
-    try writer.writeAll("}};"); // End .productions, meta_productions
+    try writer.writeAll("}};"); // End .rhs, meta_productions
 
     try writer.flush();
 }

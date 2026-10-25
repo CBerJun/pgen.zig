@@ -370,15 +370,15 @@ fn dumpCfg(symbol_spec: pgen.sym.SymbolSpec, productions: pgen.cfg.CfgProduction
         symbol_spec.terminals.count,
         symbol_spec.nonterminals.count,
         symbol_spec.nonterminals.node_forming_count,
-        symbol_spec.total_productions,
+        symbol_spec.count,
         symbol_spec.nonterminals.entry,
     });
     for (0..symbol_spec.nonterminals.node_forming_count) |nt| {
         std.debug.print("  NT{}: {s}\n", .{ nt, symbol_spec.nonterminals.names[nt] });
     }
-    for (0..productions.total_productions) |prod| {
-        std.debug.print("  Prod({}) NT{}:", .{ prod, productions.production_lhs[prod] });
-        for (productions.productions[prod]) |sym| {
+    for (0..productions.count) |prod| {
+        std.debug.print("  Prod({}) NT{}:", .{ prod, productions.lhs[prod] });
+        for (productions.rhs[prod]) |sym| {
             switch (sym) {
                 .terminal => |t| std.debug.print(" T{}", .{t}),
                 .nonterminal => |nt| std.debug.print(" NT{}", .{nt}),
@@ -387,7 +387,7 @@ fn dumpCfg(symbol_spec: pgen.sym.SymbolSpec, productions: pgen.cfg.CfgProduction
         std.debug.print("\n", .{});
     }
     std.debug.print("Pact:", .{});
-    for (productions.production_pact[0..symbol_spec.nonterminals.count]) |pact| {
+    for (productions.pact[0..symbol_spec.nonterminals.count]) |pact| {
         std.debug.print(" {}", .{pact});
     }
     std.debug.print("\n", .{});

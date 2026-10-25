@@ -18,9 +18,10 @@ pub fn firstGraph(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, 
         var succ: std.ArrayList(u32) = .empty;
         errdefer succ.deinit(allocator);
 
-        for (productions.productionsOf(symbol_spec, @intCast(nt))) |rhs| {
-            if (rhs.len > 0) {
-                switch (rhs[0]) {
+        var it = productions.of(symbol_spec, @intCast(nt));
+        while (it.next()) |rule| {
+            if (rule.rhs.len > 0) {
+                switch (rule.rhs[0]) {
                     .nonterminal => |x| try succ.append(allocator, x),
                     .terminal => {},
                 }
@@ -50,12 +51,11 @@ pub const DefUse = struct {
         }
         errdefer result.free(allocator);
         for (0..symbol_spec.nonterminals.count) |nt_l| {
-            var prod_index = productions.production_pact[nt_l];
-            const prod_end = productions.productionEndIndexOf(symbol_spec, @intCast(nt_l));
-            while (prod_index < prod_end) : (prod_index += 1) {
-                for (productions.productions[prod_index]) |symbol| {
+            var it = productions.of(symbol_spec, @intCast(nt_l));
+            while (it.next()) |rule| {
+                for (rule.rhs) |symbol| {
                     switch (symbol) {
-                        .nonterminal => |nt_r| try result.uses[nt_r].append(allocator, prod_index),
+                        .nonterminal => |nt_r| try result.uses[nt_r].append(allocator, rule.id),
                         .terminal => {},
                     }
                 }
@@ -77,19 +77,20 @@ pub fn nullableAnalysis(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProduct
     var nullable: std.DynamicBitSetUnmanaged = try .initEmpty(allocator, symbol_spec.nonterminals.count);
     errdefer nullable.deinit(allocator);
 
-    var count = try allocator.alloc(u32, productions.total_productions);
+    var count = try allocator.alloc(u32, productions.count);
     defer allocator.free(count);
     // Initialize count to number of symbols on RHS for each production
-    for (0..productions.total_productions) |i| {
-        count[i] = @intCast(productions.productions[i].len);
+    for (0..productions.count) |i| {
+        count[i] = @intCast(productions.rhs[i].len);
     }
 
     var work_list: std.ArrayList(u32) = .empty;
     defer work_list.deinit(allocator);
 
     for (0..symbol_spec.nonterminals.count) |nt| {
-        for (productions.productionsOf(symbol_spec, @intCast(nt))) |rhs| {
-            if (rhs.len == 0) {
+        var it = productions.of(symbol_spec, @intCast(nt));
+        while (it.next()) |rule| {
+            if (rule.rhs.len == 0) {
                 nullable.set(nt);
                 try work_list.append(allocator, @intCast(nt));
                 break;
@@ -99,7 +100,7 @@ pub fn nullableAnalysis(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProduct
 
     while (work_list.pop()) |nt| {
         for (def_use.uses[nt].items) |prod_index| {
-            const lhs = productions.production_lhs[prod_index];
+            const lhs = productions.lhs[prod_index];
             if (nullable.isSet(lhs)) { // Already nullable
                 continue;
             }
@@ -152,8 +153,9 @@ pub fn firstSet(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, nu
         var succ: std.ArrayList(u32) = .empty; // Successors of `u` in `graph`
         errdefer succ.deinit(allocator);
 
-        for (productions.productionsOf(symbol_spec, @intCast(u))) |rhs| {
-            for (rhs) |symbol| {
+        var it = productions.of(symbol_spec, @intCast(u));
+        while (it.next()) |rule| {
+            for (rule.rhs) |symbol| {
                 switch (symbol) {
                     .terminal => |tid| {
                         T[u].set(tid);
@@ -245,8 +247,9 @@ pub fn followSet(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, n
     T[symbol_spec.nonterminals.entry].set(symbol_spec.terminals.eoi);
 
     for (0..symbol_spec.nonterminals.count) |u| {
-        for (productions.productionsOf(symbol_spec, @intCast(u))) |rhs| {
-            if (rhs.len == 0) {
+        var it = productions.of(symbol_spec, @intCast(u));
+        while (it.next()) |rule| {
+            if (rule.rhs.len == 0) {
                 // Empty production does not contribute; necessary to
                 // avoid unsigned int overflow
                 continue;
@@ -257,18 +260,18 @@ pub fn followSet(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, n
             var running: std.DynamicBitSetUnmanaged = try .initEmpty(allocator, symbol_spec.terminals.count);
             defer running.deinit(allocator);
 
-            var k = rhs.len - 1;
+            var k = rule.rhs.len - 1;
             // A "blocking" symbol is a terminal or a non-nullable nonterminal
             var no_block = true; // If we haven't encountered any blocking symbol
             while (true) {
-                const is_blocking = switch (rhs[k]) {
+                const is_blocking = switch (rule.rhs[k]) {
                     .terminal => true,
                     .nonterminal => |nt| !nullable.isSet(nt),
                 };
                 if (is_blocking) {
                     running.unsetAll();
                 }
-                switch (rhs[k]) {
+                switch (rule.rhs[k]) {
                     .terminal => |tid| {
                         running.set(tid);
                     },
@@ -283,7 +286,7 @@ pub fn followSet(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, n
                     no_block = false;
                 }
                 if (k > 0) {
-                    const prev_symbol = rhs[k - 1];
+                    const prev_symbol = rule.rhs[k - 1];
                     switch (prev_symbol) {
                         .nonterminal => |nt| T[nt].setUnion(running),
                         .terminal => {},
@@ -329,7 +332,7 @@ pub const Action = union(enum) {
 /// An LR(0) item -- a production with a dot.
 /// **Always be careful if you are handling the augmented production.**
 pub const Item = struct {
-    /// Production ID. This is an index into `cfg.CfgProductions.productions`, or
+    /// Production ID. This is an index into `cfg.CfgProductions.rhs`, or
     /// the augmented production "S' -> S $" if equal to `augmented_production`.
     production: u32,
     /// Dot position (before i-th symbol of rhs, or at the end if i = rhs.len)
@@ -397,7 +400,7 @@ pub fn reachableNtsAfterDot(symbol_spec: sym.SymbolSpec, productions: cfg.CfgPro
                 nt = symbol_spec.nonterminals.entry;
             }
         } else {
-            const rhs = productions.productions[item.production];
+            const rhs = productions.rhs[item.production];
             if (item.dot < rhs.len) {
                 switch (rhs[item.dot]) {
                     .nonterminal => |x| nt = x,
@@ -546,7 +549,7 @@ pub fn lr0(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, tarjan:
                 }
             } else {
                 std.debug.assert(core_item.dot != 0);
-                const rhs = productions.productions[core_item.production];
+                const rhs = productions.rhs[core_item.production];
                 if (core_item.dot == rhs.len) {
                     try backend.reduce(core_item.production);
                 } else {
@@ -568,17 +571,17 @@ pub fn lr0(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, tarjan:
         defer nts_after_dot.deinit(allocator);
         var nt_it = nts_after_dot.iterator(.{});
         while (nt_it.next()) |nt| {
-            for (productions.production_pact[nt]..productions.productionEndIndexOf(symbol_spec, @intCast(nt))) |prod_id| {
+            var it = productions.of(symbol_spec, @intCast(nt));
+            while (it.next()) |rule| {
                 // Dot is at position 0
-                const rhs = productions.productions[prod_id];
-                if (rhs.len == 0) {
-                    try backend.reduce(@as(u32, @intCast(prod_id)));
+                if (rule.rhs.len == 0) {
+                    try backend.reduce(rule.id);
                 } else {
                     const neighbor_item: Item = .{
-                        .production = @intCast(prod_id),
+                        .production = rule.id,
                         .dot = 1,
                     };
-                    switch (rhs[0]) {
+                    switch (rule.rhs[0]) {
                         .terminal => |tid| try neighbor_shift.addCoreItem(allocator, tid, neighbor_item),
                         .nonterminal => |nt2| try neighbor_goto.addCoreItem(allocator, nt2, neighbor_item),
                     }
