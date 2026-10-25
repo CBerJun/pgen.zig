@@ -50,12 +50,12 @@ function backendParse(input, cstOwnsToken) {
 
 document.addEventListener('DOMContentLoaded', () => {
     const inputSource = document.getElementById("input-source");
-    const cstOwnsToken = document.getElementById("cst-owns-token").checked;
+    const cstOwnsToken = document.getElementById("cst-owns-token");
     const stderrBox = document.getElementById("output-stderr");
     const stdoutBox = document.getElementById("output-stdout");
     let debounceTimer = null;
     function goParse() {
-        const {stderrText, stdoutText} = backendParse(inputSource.value, cstOwnsToken);
+        const {stderrText, stdoutText} = backendParse(inputSource.value, cstOwnsToken.checked);
         stderrBox.textContent = (stderrText.length > 0) ? stderrText : "(no error)";
         stdoutBox.textContent = (stdoutText.length > 0) ? stdoutText : "(no output)";
     }
