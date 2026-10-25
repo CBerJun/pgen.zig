@@ -36,21 +36,30 @@ const ast = @import("./ast.zig");
 const diagnostic = @import("./diagnostic.zig");
 
 /// Managed `cfg.Cfg` with an arena allocator owning all memory except
-/// `.terminals` and `.nonterminals.names` (which are borrowed).
+/// `.terminals` and `.nonterminals` (which are borrowed).
 pub const CfgManaged = struct {
     cfg: cfg.Cfg,
-    arena: std.heap.ArenaAllocator,
+    arena: *std.heap.ArenaAllocator,
+    /// Owner of `arena`.
+    allocator: std.mem.Allocator,
 
     pub fn fromAst(symbol_spec: ast.SymbolSpec, productions: ast.EbnfProductions, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
-        var arena: std.heap.ArenaAllocator = .init(allocator);
+        var arena = try allocator.create(std.heap.ArenaAllocator);
+        arena.* = .init(allocator);
+        errdefer {
+            arena.deinit();
+            allocator.destroy(arena);
+        }
         return .{
             .cfg = try astToCfg(symbol_spec, productions, pool, arena.allocator(), scrap_allocator),
             .arena = arena,
+            .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *@This()) void {
         self.arena.deinit();
+        self.allocator.destroy(self.arena);
         self.* = undefined;
     }
 };

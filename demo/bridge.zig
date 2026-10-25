@@ -151,14 +151,6 @@ export fn pgenParse(
     defer cfg_managed.deinit();
     const cfg = cfg_managed.cfg;
 
-    // BELIEVE IT OR NOT, DELETING THIS STATEMENT BELOW CAUSES A CRASH AT
-    // RUNTIME: changing `cfg.total_productions` to something else that does
-    // not access `cfg` also causes crash. It's either an upstream bug in
-    // Zig compiler, or we are invoking illegal behavior. However this code
-    // is mostly adapted from the main CLI which runs just fine.
-    defer report.addError("Total CFG productions: {}\n", .{
-        cfg.total_productions,
-    });
     // Currently just enable SLR backend.
     var ds: pgen.lr0.DataStructures = .{ .allocator = gpa, .grammar = cfg };
     defer ds.deinit();
