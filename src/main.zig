@@ -8,7 +8,7 @@ const BUFFER_SIZE = 4096;
 
 const Logger = struct {
     io: std.Io,
-    stderr: std.Io.File,
+    file: std.Io.File,
     allocator: std.mem.Allocator,
     buffer: []u8,
     file_writer: std.Io.File.Writer,
@@ -18,7 +18,7 @@ const Logger = struct {
         const stderr = std.Io.File.stderr();
         return .{
             .io = init_.io,
-            .stderr = stderr,
+            .file = stderr,
             .allocator = allocator,
             .buffer = buffer,
             .file_writer = stderr.writer(init_.io, buffer),
@@ -37,7 +37,7 @@ const Logger = struct {
 
     pub fn deinit(self: *@This()) void {
         self.file_writer.flush() catch |err| {
-            std.debug.print("write to stderr failed ({s})", .{@errorName(err)});
+            std.debug.print("writing to stderr failed ({s})", .{@errorName(err)});
         };
         self.allocator.free(self.buffer);
         self.* = undefined;
@@ -98,6 +98,7 @@ const CliParser = struct {
         while (self.iterator.next()) |arg| {
             if (arg.len == 0) {
                 self.aggregator.add(.warning, "skipping empty CLI argument", .{});
+                continue;
             }
             if (arg[0] != '-' or end_of_options) {
                 // Non-option, treat as input file
