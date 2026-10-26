@@ -33,9 +33,11 @@ const pgen = b.dependency("pgen", .{
     .optimize = optimize,
 });
 const pgen_cli = pgen.artifact("pgenzig");
+// Run the parser generator during build time.
 const run_pgen = b.addRunArtifact(pgen_cli);
-run_pgen.addFileArg(b.path("src/my_input_grammar.txt"));
+run_pgen.addArg("-o");
 const parser_src = run_pgen.addOutputFileArg("parser.zig");
+run_pgen.addFileArg(b.path("src/my_input_grammar.txt"));
 // The generated parser should target the actual build target.
 const parser_mod = b.createModule(.{
     .root_source_file = parser_src,
