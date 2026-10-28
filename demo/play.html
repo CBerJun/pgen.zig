@@ -61,6 +61,23 @@ rhs_factor:
 rhs: rhs_factor ("|" rhs_factor)*;
     </pre>
     <p>Try to mess around with the grammar and see how the program detects a problem in the grammar (e.g. undeclared name).</p>
+    <p>The following grammar, for instance, is ambiguous (the famous <a href="https://en.wikipedia.org/wiki/Dangling_else">dangling else</a> problem), so pgen.zig will give you an error:</p>
+    <pre>
+tokens {
+    NUMBER;
+    "";  # Operators/Punctuation
+    ""kw;  # Keywords
+}
+entry stmt;
+stmt: "print"kw expr ";"
+    | "if"kw expr "then"kw stmt ["else"kw stmt]  # Optional else prong (ambiguous!)
+    | "{" stmt* "}";
+expr: term (("+" | "-") term)*;
+term: factor (("*" | "/") factor)*;
+factor: NUMBER | "(" expr ")";
+# Should the else prong belong to the first "if" or the second "if" in
+# `if 1 then if 2 then print 3 else print 4`?
+    </pre>
     <div id="app">
         <p>Input grammar:</p>
         <textarea id="input-source"></textarea>
