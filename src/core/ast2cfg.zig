@@ -366,6 +366,7 @@ const AstToCfg = struct {
                 prev_nt = nt;
             }
         }
+        @memset(production_pact[prev_nt +% 1 .. self.aux_nt], total_productions);
 
         return .{ sym.SymbolSpec{
             .terminals = self.symbol_spec.terminals,
