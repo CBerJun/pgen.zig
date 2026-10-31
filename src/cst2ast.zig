@@ -310,6 +310,14 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.
             .{entry_nt_string},
         );
     };
+    if (entry_nt >= node_forming_nt_count) {
+        return fatalAt(
+            aggregator,
+            entry_token,
+            "entry nonterminal must not be 'nodeless'",
+            .{},
+        );
+    }
     // Label literal terminals
     var terminal_id: u32 = 0;
     var literal_collections = try symbol_allocator.alloc(sym.LiteralCollection, literal_terminals_map.size);
