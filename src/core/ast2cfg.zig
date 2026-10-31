@@ -332,7 +332,7 @@ const AstToCfg = struct {
 
     /// Lastly, sort production list and generate the pact representation.
     pub fn getResult(self: *@This()) std.mem.Allocator.Error!struct { sym.SymbolSpec, cfg.CfgProductions } {
-        try self.removeUnproductive();
+        try self.removeUseless();
         const productions = try self.pm.productions.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(productions);
         const total_productions: u32 = @intCast(productions.len);
@@ -383,75 +383,150 @@ const AstToCfg = struct {
         } };
     }
 
-    // Optimization: get rid of unproductive nonterminals and productions.
+    // Optimization: get rid of unproductive/unreachable nonterminals and
+    // productions.
     // Only call after the grammar has been built.
-    fn removeUnproductive(self: *@This()) std.mem.Allocator.Error!void {
-        // Algorithm: similar to Kahn's algorithm for topological sort
-        // Maintain how many unresolved nts each production references on its
-        // rhs, then precompute for each nt what productions use it (and how
-        // many times). We keep marking nts as productive as long as there
-        // exists a production with unresolved nt count = 0.
+    fn removeUseless(self: *@This()) std.mem.Allocator.Error!void {
         const n_rules = self.pm.productions.items.len;
         const n_nts = self.aux_nt; // aux_nt is total nts once we're done generating CFG
-        // How many unresolved nts still on RHS of each rule?
-        var count = try self.scrap_allocator.alloc(u32, n_rules);
-        defer self.scrap_allocator.free(count);
-        @memset(count, 0);
-        // What rules used each nt?
-        var uses = try self.scrap_allocator.alloc(std.ArrayList(u32), n_nts);
-        @memset(uses, .empty);
-        defer {
-            for (uses) |*row|
-                row.deinit(self.scrap_allocator);
-            self.scrap_allocator.free(uses);
-        }
+        const entry_nt = self.symbol_spec.nonterminals.entry;
         // Whether each nt is productive:
         var nt_productive = try std.DynamicBitSetUnmanaged.initEmpty(self.scrap_allocator, n_nts);
         defer nt_productive.deinit(self.scrap_allocator);
-        // Whether each production/rule is productive:
+        // Whether each production/rule is productive (whether it does not
+        // contain any unproductive nts):
         var rule_productive = try std.DynamicBitSetUnmanaged.initEmpty(self.scrap_allocator, n_rules);
         defer rule_productive.deinit(self.scrap_allocator);
-        // First populate `uses` and `count`.
-        for (0..n_rules) |rule_id| {
-            const cnt = &count[rule_id];
-            for (self.pm.productions.items[rule_id]) |rhs_sym| {
-                switch (rhs_sym) {
-                    .nonterminal => |rhs_nt| {
-                        cnt.* += 1;
-                        try uses[rhs_nt].append(self.scrap_allocator, @intCast(rule_id));
-                    },
-                    .terminal => {},
+        {
+            // Algorithm: similar to Kahn's algorithm for topological sort
+            // Maintain how many unresolved nts each production references on its
+            // rhs, then precompute for each nt what productions use it (and how
+            // many times). We keep marking nts as productive as long as there
+            // exists a production with unresolved nt count = 0.
+            // How many unresolved nts still on RHS of each rule?
+            var count = try self.scrap_allocator.alloc(u32, n_rules);
+            defer self.scrap_allocator.free(count);
+            @memset(count, 0);
+            // What rules used each nt?
+            var uses = try self.scrap_allocator.alloc(std.ArrayList(u32), n_nts);
+            @memset(uses, .empty);
+            defer {
+                for (uses) |*row|
+                    row.deinit(self.scrap_allocator);
+                self.scrap_allocator.free(uses);
+            }
+            // First populate `uses` and `count`.
+            for (0..n_rules) |rule_id| {
+                const cnt = &count[rule_id];
+                for (self.pm.productions.items[rule_id]) |rhs_sym| {
+                    switch (rhs_sym) {
+                        .nonterminal => |rhs_nt| {
+                            cnt.* += 1;
+                            try uses[rhs_nt].append(self.scrap_allocator, @intCast(rule_id));
+                        },
+                        .terminal => {},
+                    }
                 }
             }
-        }
-        // Now we can do a work list to DFS while marking productive nts/rules
-        var stack: std.ArrayList(u32) = .empty; // Stack of rule IDs
-        defer stack.deinit(self.scrap_allocator);
-        // Populate with already productive productions (no nonterminal
-        // on RHS at all).
-        for (count, 0..) |cnt, rule_id| {
-            if (cnt == 0) {
-                try stack.append(self.scrap_allocator, @intCast(rule_id));
+            // Now we can do a work list to DFS while marking productive nts/rules
+            var stack: std.ArrayList(u32) = .empty; // Stack of rule IDs
+            defer stack.deinit(self.scrap_allocator);
+            // Populate with already productive productions (no nonterminal
+            // on RHS at all).
+            for (count, 0..) |cnt, rule_id| {
+                if (cnt == 0) {
+                    try stack.append(self.scrap_allocator, @intCast(rule_id));
+                }
             }
-        }
-        while (stack.pop()) |rule_id| {
-            // So we know that `rule_id` is a productive rule.
-            rule_productive.set(rule_id);
-            const lhs = self.pm.production_lhs.items[rule_id];
-            // So now this nt `lhs` is productive.
-            if (!nt_productive.isSet(lhs)) {
-                // If not already marked, resolve uses of `lhs` on RHS.
-                nt_productive.set(lhs);
-                for (uses[lhs].items) |user_rule_id| {
-                    const ptr = &count[user_rule_id];
-                    ptr.* -= 1;
-                    if (ptr.* == 0) { // All nts on RHS resolved
-                        try stack.append(self.scrap_allocator, user_rule_id);
+            while (stack.pop()) |rule_id| {
+                // So we know that `rule_id` is a productive rule.
+                rule_productive.set(rule_id);
+                const lhs = self.pm.production_lhs.items[rule_id];
+                // So now this nt `lhs` is productive.
+                if (!nt_productive.isSet(lhs)) {
+                    // If not already marked, resolve uses of `lhs` on RHS.
+                    nt_productive.set(lhs);
+                    for (uses[lhs].items) |user_rule_id| {
+                        const ptr = &count[user_rule_id];
+                        ptr.* -= 1;
+                        if (ptr.* == 0) { // All nts on RHS resolved
+                            try stack.append(self.scrap_allocator, user_rule_id);
+                        }
                     }
                 }
             }
         }
+
         // We've now marked all productive nts and rules.
+        // Before we go for getting rid of unproductive things, we can actually
+        // insert another optimization here, then relabel nts just once (saves
+        // another traversal). Just make sure we ignore unproductive rules.
+        // We may get rid of unreachable nts in grammar: those that aren't
+        // referenced by the entry nt.
+        // We must find unreachable after finding unproductive since unproductive
+        // optimization may introduce new unreachable nts.
+        var reachable = try std.DynamicBitSetUnmanaged.initEmpty(self.scrap_allocator, n_nts);
+        defer reachable.deinit(self.scrap_allocator);
+        {
+            // For each nt, all productions that have it as lhs:
+            var defs = try self.scrap_allocator.alloc(std.ArrayList(u32), n_nts);
+            @memset(defs, .empty);
+            defer {
+                for (defs) |*row|
+                    row.deinit(self.scrap_allocator);
+                self.scrap_allocator.free(defs);
+            }
+            // Build `defs` first.
+            for (0..n_rules) |rule_id| {
+                if (!rule_productive.isSet(rule_id))
+                    continue;
+                try defs[self.pm.production_lhs.items[rule_id]].append(self.scrap_allocator, @intCast(rule_id));
+            }
+
+            // This condition check is necessary because the following code assumes
+            // entry is reachable; but if the entry is unproductive it should be
+            // considered unreachable (and therefore everything is unreachable).
+            if (nt_productive.isSet(entry_nt)) {
+                // DFS starting from entry to mark used nts as reachable.
+                var stack: std.ArrayList(u32) = .empty; // Stack of nts
+                defer stack.deinit(self.scrap_allocator);
+                try stack.append(self.scrap_allocator, entry_nt);
+                reachable.set(entry_nt);
+                while (stack.pop()) |nt| {
+                    for (defs[nt].items) |rule_id| {
+                        for (self.pm.productions.items[rule_id]) |symbol| {
+                            switch (symbol) {
+                                .terminal => {},
+                                .nonterminal => |nt_used| if (!reachable.isSet(nt_used)) {
+                                    reachable.set(nt_used);
+                                    try stack.append(self.scrap_allocator, nt_used);
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+
+            // `reachable` is now built.
+            // Any non-productive nt must not be reachable since we ignored
+            // unproductive rules.
+            std.debug.assert(nt_productive.supersetOf(reachable));
+            nt_productive.toggleSet(reachable);
+            // `nt_productive` HAS ITS MEANING CHANGED, now it selects all nts
+            // that are productive but unreachable.
+            {
+                var it = nt_productive.iterator(.{});
+                while (it.next()) |nt| {
+                    // Also remove unreachable productions
+                    for (defs[nt].items) |rule_id|
+                        rule_productive.unset(rule_id);
+                }
+            }
+            // `rule_productive` HAS ITS MEANING CHANGED, now it selects all
+            // rules that are both productive and reachable.
+        }
+
+        // Now we can modify the grammar.
         // For productions we move useless ones to the end of the list, then
         // truncate them.
         {
@@ -477,7 +552,7 @@ const AstToCfg = struct {
             var psa = try self.scrap_allocator.alloc(u32, self.aux_nt - node_forming_cnt);
             defer self.scrap_allocator.free(psa);
             @memset(psa, 0);
-            var it = nt_productive.iterator(.{
+            var it = reachable.iterator(.{
                 .kind = .unset,
                 // Reverse so that non node forming nts come first; we can stop
                 // immediately once reached a node forming nt
