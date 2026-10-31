@@ -455,7 +455,12 @@ const AstToCfg = struct {
         // For productions we move useless ones to the end of the list, then
         // truncate them.
         {
-            var it = rule_productive.iterator(.{ .kind = .unset });
+            var it = rule_productive.iterator(.{
+                .kind = .unset,
+                // Backward iteration ensures the correctness of ordering
+                // between `swapRemove`s.
+                .direction = .reverse,
+            });
             while (it.next()) |rule_id| {
                 _ = self.pm.production_lhs.swapRemove(rule_id);
                 _ = self.pm.productions.swapRemove(rule_id);
@@ -464,6 +469,52 @@ const AstToCfg = struct {
         // For nts, we can't delete node forming ones because they are named
         // and always part of the generated `Nonterminal` enum. We could delete
         // non node forming ones but that would require relabelling nts.
+        {
+            const node_forming_cnt = self.symbol_spec.nonterminals.node_forming_count;
+            // Each nt is relabelled by subtracting its ID by the number of
+            // unproductive nts that have an ID less than it. We can precompute
+            // that (build a prefix sum array).
+            var psa = try self.scrap_allocator.alloc(u32, self.aux_nt - node_forming_cnt);
+            defer self.scrap_allocator.free(psa);
+            @memset(psa, 0);
+            var it = nt_productive.iterator(.{
+                .kind = .unset,
+                // Reverse so that non node forming nts come first; we can stop
+                // immediately once reached a node forming nt
+                .direction = .reverse,
+            });
+            while (it.next()) |nt| {
+                if (nt < node_forming_cnt)
+                    break;
+                psa[nt - node_forming_cnt] = 1;
+            }
+            // Now run prefix sum
+            for (1..psa.len) |i| {
+                psa[i] += psa[i - 1];
+            }
+            // Rewrite all the nts in productions
+            // Unproductive nts themselves must not appear anywhere since
+            // those productions that use them must be unproductive, and
+            // they should've been removed already.
+            for (self.pm.production_lhs.items) |*lhs| {
+                if (lhs.* >= node_forming_cnt)
+                    lhs.* -= psa[lhs.* - node_forming_cnt];
+            }
+            for (self.pm.productions.items) |rhs| {
+                for (rhs) |*symbol| {
+                    switch (symbol.*) {
+                        .terminal => {},
+                        .nonterminal => |*nt| {
+                            if (nt.* >= node_forming_cnt)
+                                nt.* -= psa[nt.* - node_forming_cnt];
+                        },
+                    }
+                }
+            }
+            // Don't forget to adjust the number of aux nts.
+            if (psa.len > 0)
+                self.aux_nt -= psa[psa.len - 1];
+        }
     }
 };
 
