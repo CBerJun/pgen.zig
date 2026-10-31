@@ -70,6 +70,7 @@ const CliParser = struct {
     token_extra: []u8 = &.{},
     in_file_path: []u8 = &.{},
     out_file_path: []u8 = &.{},
+    dump_cfg: bool = false,
 
     pub fn init(process_init: std.process.Init, allocator: std.mem.Allocator, aggregator: *pgen.diagnostic.Aggregator) std.mem.Allocator.Error!@This() {
         return .{
@@ -156,7 +157,12 @@ const CliParser = struct {
                     \\    -token-extra CODE Extra source code to add into the Token struct.
                     \\    -h                Print this message
                     \\
+                    \\Debug option for developers:
+                    \\    -dump-cfg         Dump generated CFG
+                    \\
                 , .{});
+            } else if (std.mem.eql(u8, rest, "dump-cfg")) {
+                self.dump_cfg = true;
             } else {
                 self.aggregator.add(.fatal, "unrecognized argument -{s}", .{rest});
                 return false;
@@ -302,7 +308,9 @@ pub fn main(init: std.process.Init) u8 {
     defer cfg_managed.deinit();
 
     // Debug dump the CFG
-    // dumpCfg(cfg);
+    if (cli.dump_cfg) {
+        dumpCfg(cfg_managed.symbol_spec, cfg_managed.productions);
+    }
 
     // Currently just enable SLR backend.
     var ds: pgen.lr0.DataStructures = .{
@@ -386,7 +394,7 @@ fn dumpCfg(symbol_spec: pgen.sym.SymbolSpec, productions: pgen.cfg.CfgProduction
         symbol_spec.terminals.count,
         symbol_spec.nonterminals.count,
         symbol_spec.nonterminals.node_forming_count,
-        symbol_spec.count,
+        productions.count,
         symbol_spec.nonterminals.entry,
     });
     for (0..symbol_spec.nonterminals.node_forming_count) |nt| {
