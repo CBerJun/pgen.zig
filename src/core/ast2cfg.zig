@@ -16,13 +16,13 @@
 //
 // There are mainly two types of nodes which allow optimization *on its children*:
 // `.zero_or_more` and `.choose`. A `.zero_or_more` having a `.concat` operand
-// allows the `.concat` to introduce no aux nt. Any children of a `.choose`
-// does not require an aux nt. Of course, a `.zero_or_more` may be nested in
-// a `.choose` in which case we can optimize away `.zero_or_more`'s operand at
-// the same time. We don't handle recursive `.choose` since the AST interning
+// allows the `.concat` to introduce no aux nt. A `.choose` allows its children
+// that are not a repeat node (`.zero_or_more` or `.one_or_more`) to introduce
+// no aux nt. We don't handle recursive `.choose` since the AST interning
 // should have normalized (flattened) it.
 //
-// The entire right-sand-side expression of a production can also be optimized.
+// The entire right-sand-side expression of a production can also be optimized,
+// even if that RHS expression is a repeat node.
 //
 // We do 2 passes. In pass 1, determine how many times each interned AST node
 // gets used (on the right hand side of an EBNF production). In pass 2, we
@@ -236,6 +236,8 @@ const AstToCfg = struct {
                         const opr_nt = self.getSymbol(opr);
                         // L: X+ => L: X and L: L X.
                         try self.pm.add(frame.target, &.{opr_nt});
+                        // THIS ONLY WORKS IF `frame.target` EXCLUSIVELY EXPANDS
+                        // TO THIS `.one_or_more` node.
                         try self.pm.add(frame.target, &.{ .{ .nonterminal = frame.target }, opr_nt });
                     }
                 },
@@ -275,6 +277,8 @@ const AstToCfg = struct {
                             try self.pm.add(frame.target, &.{});
                             const x = try self.allocator.alloc(cfg.Symbol, opr.concat.len + 1);
                             errdefer self.allocator.free(x);
+                            // THIS ONLY WORKS IF `frame.target` EXCLUSIVELY EXPANDS
+                            // TO THIS `.zero_or_more` node.
                             x[0] = .{ .nonterminal = frame.target };
                             for (opr.concat, 1..) |sub_opr, i|
                                 x[i] = self.getSymbol(sub_opr);
@@ -293,6 +297,8 @@ const AstToCfg = struct {
                             // Exiting: add productions
                             // L: X* => L: epsilon and L: L X.
                             try self.pm.add(frame.target, &.{});
+                            // THIS ONLY WORKS IF `frame.target` EXCLUSIVELY EXPANDS
+                            // TO THIS `.zero_or_more` node.
                             try self.pm.add(frame.target, &.{ .{ .nonterminal = frame.target }, self.getSymbol(opr) });
                         }
                     }
@@ -313,8 +319,10 @@ const AstToCfg = struct {
                         const sub_expr = operands[frame.i];
                         if (sub_expr.* == .epsilon) {
                             try self.pm.add(frame.target, &.{});
-                        } else if (self.oneUse(sub_expr)) {
-                            // Direct assign
+                        } else if (self.oneUse(sub_expr) and sub_expr.* != .zero_or_more and sub_expr.* != .one_or_more) {
+                            // Direct assign, but only if subexpression is not
+                            // a repeat node. The repeat nodes assume their target
+                            // exclusively expands to the repeat.
                             try self.push(sub_expr, frame.target);
                         } else {
                             try self.pushWithAux(sub_expr);
