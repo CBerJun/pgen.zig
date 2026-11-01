@@ -63,8 +63,12 @@ pub const Driver = struct {
                 token.deinit(self.allocator);
                 return switch (err) {
                     error.PgenParseError => blk: {
-                        // TODO: diagnostic
-                        try self.stderr.writeAll("parse failed\n");
+                        // TODO: more diagnostic after pgen itself supports it
+                        const loc = tokenizer.current_loc;
+                        try self.stderr.print("parse failed near line {} column {}\n", .{
+                            // 0-indexed to 1-indexed
+                            loc.ln + 1, loc.col + 1,
+                        });
                         break :blk error.GrammarError;
                     },
                     else => |e| e,
