@@ -30,11 +30,6 @@ pub fn main(init: std.process.Init) !void {
     var out_writer = file.writer(init.io, &out_buffer);
     const writer = &out_writer.interface;
 
-    // var backend: pgen.backends.Lr0ZigSwitchBackend = .{
-    //     .emitter = .{
-    //         .out = writer,
-    //     },
-    // };
     var backend: pgen_core.backends.SlrBackend(
         pgen_core.backends.ZigSwitchActionHandler(void),
         pgen_core.backends.ZigSwitchGotoHandler,

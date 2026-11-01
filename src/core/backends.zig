@@ -46,7 +46,7 @@ fn stringToZigIdentifier(str: []const u8, out: *std.Io.Writer) std.Io.Writer.Err
 
 /// Struct responsible for emitting the final Zig source code.
 /// Includes skeleton code shared by all LR style parsers.
-const ZigEmitter = struct {
+pub const ZigEmitter = struct {
     out: *std.Io.Writer,
     /// Extra fields/methods in `Token` struct. Can be used to add extra info
     /// to tokens like source location or string literal contents. A list of

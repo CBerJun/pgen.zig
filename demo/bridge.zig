@@ -43,16 +43,6 @@ const ErrorReport = struct {
         };
     }
 
-    pub fn dumpAggregator(self: *@This(), aggregator: *pgen.diagnostic.Aggregator) void {
-        if (aggregator.fatal)
-            self.failed = true;
-        if (self.oom)
-            return;
-        aggregator.printDiagnostics(self.writer()) catch {
-            self.signalWriteFailed();
-        };
-    }
-
     pub fn getResult(self: *@This()) []const u8 {
         if (self.oom)
             return oom_instance;
@@ -62,8 +52,8 @@ const ErrorReport = struct {
     }
 };
 
-// Returned buffer (`out_error`, `out_result`) must be deinited with
-// `releaseMessage`.
+/// Returned buffer (`out_error`, `out_result`) must be deinited with
+/// `releaseMessage`.
 export fn pgenParse(
     src_ptr: [*]const u8,
     src_len: usize,
@@ -78,165 +68,26 @@ export fn pgenParse(
 
     out_result.* = &.{};
 
-    var aggregator: pgen.diagnostic.Aggregator = .withLogging(gpa);
-    defer aggregator.deinit();
     var report: ErrorReport = .init();
     defer {
-        report.dumpAggregator(&aggregator);
         out_error.* = report.getResult();
         report.deinit();
     }
-
-    var tokenizer: pgen.Tokenizer = .{
-        .reader = reader,
-        .payload_allocator = gpa,
-        .scrap_allocator = gpa,
-        .diagnostic_aggregator = &aggregator,
-    };
-    var parser = pgen.psr.Parser.init(gpa) catch |err| switch (err) {
-        error.OutOfMemory => {
-            report.addError("OOM (tokenizer)\n", .{});
-            return;
-        },
-    };
-    defer parser.deinit(gpa);
-    while (tokenizer.nextToken() catch |err| switch (err) {
-        error.InvalidSyntax => {
-            // Details logged by aggregator.
-            return;
-        },
-        error.OutOfMemory => {
-            report.addError("OOM (nextToken)\n", .{});
-            return;
-        },
-        error.ReadFailed => unreachable,
-    }) |token| {
-        parser.feed(gpa, token) catch |err| {
-            token.deinit(gpa);
-            switch (err) {
-                error.OutOfMemory => {
-                    report.addError("OOM (parser)\n", .{});
-                    return;
-                },
-                error.PgenParseError => {
-                    const loc = tokenizer.current_loc;
-                    report.addError("parse failed near line {}, column {}", .{
-                        // 0-indexed to 1-indexed
-                        loc.ln + 1, loc.col + 1,
-                    });
-                    return;
-                },
-            }
-        };
-        if (token.tag == .@"$") {
-            // The EOI token does not end up in the CST and needs to be freed
-            // separately.
-            token.deinit(gpa);
-        }
-    }
-    var cst = parser.retrieve();
-    defer cst.deinit(gpa);
-    var cfg_managed, var symbol_spec, var sym_diagnostic = blk: {
-        var ast = pgen.cst2ast.EbnfManaged.fromCst(cst, gpa, gpa, &aggregator) catch |err| {
-            switch (err) {
-                error.OutOfMemory => report.addError("OOM (CST to AST)\n", .{}),
-                error.Cst2AstSemanticError => {
-                    // Details logged by aggregator.
-                },
-            }
-            return;
-        };
-        defer ast.deinit();
-        var sym_diagnostic = ast.ownedSymDiagnostic();
-        const cfg_managed = pgen.ast2cfg.CfgManaged.fromAst(ast.symbol_spec, ast.productions, &sym_diagnostic, &ast.pool, gpa, gpa) catch {
-            report.addError("OOM (AST to CFG)", .{});
-            return;
-        };
-        break :blk .{ cfg_managed, ast.ownedSymbolSpec(), sym_diagnostic };
-    };
-    defer symbol_spec.deinit(gpa);
-    defer sym_diagnostic.deinit();
-    defer cfg_managed.deinit();
-
-    // Currently just enable SLR backend.
-    var ds: pgen.lr0.DataStructures = .{
-        .allocator = gpa,
-        .symbol_spec = cfg_managed.symbol_spec,
-        .productions = cfg_managed.productions,
-    };
-    defer ds.deinit();
-    const tarjan = ds.getFirstTarjan() catch {
-        report.addError("OOM (FIRST graph Tarjan)", .{});
-        return;
-    };
-    const first_reachability = ds.getFirstReachability() catch {
-        report.addError("OOM (FIRST graph reachability)", .{});
-        return;
-    };
-    const follow_set = ds.getFollowSet() catch {
-        report.addError("OOM (FOLLOW set)", .{});
-        return;
-    };
 
     var result_alloc_writer: std.Io.Writer.Allocating = .init(gpa);
     defer result_alloc_writer.deinit();
     const writer = &result_alloc_writer.writer;
 
-    var backend: pgen.backends.SlrBackend(
-        pgen.backends.ZigSwitchActionHandler(void),
-        pgen.backends.ZigSwitchGotoHandler,
-    ) = .{
-        .emitter = .{
-            .out = writer,
-            .cst_owns_token = cst_owns_token,
-            // No -token-extra for web demo
-            .token_extra = &.{},
-        },
-        .follow_sets = &follow_set,
-        .action_handler = .{
-            .symbol_spec = &cfg_managed.symbol_spec,
-            .productions = &cfg_managed.productions,
-            .conflict_resolver = {},
-        },
-        .goto_handler = .{},
-    };
-    defer backend.free();
-    pgen.lr0.lr0(
-        cfg_managed.symbol_spec,
-        cfg_managed.productions,
-        tarjan,
-        first_reachability,
-        @TypeOf(backend),
-        &backend,
-        gpa,
-    ) catch |err| {
+    var driver: pgen.driver.Driver = .init(gpa, reader, report.writer(), writer, .{
+        .cst_owns_token = cst_owns_token,
+    });
+    driver.go() catch |err| {
         switch (err) {
-            error.OutOfMemory => report.addError("OOM (LR(0) table gen)", .{}),
-            error.WriteFailed => report.addError("Write to output file failed", .{}),
-            error.LrConflict => {
-                report.addError("Table gen conflict! Your grammar is ambiguous OR not SLR-compatible.\n", .{});
-                const cr = backend.conflict_report.?;
-                pgen.explain.conflict(
-                    gpa,
-                    pgen.lr0.Item,
-                    report.writer(),
-                    cfg_managed.symbol_spec,
-                    cfg_managed.productions,
-                    sym_diagnostic,
-                    cr,
-                ) catch |err2| {
-                    switch (err2) {
-                        error.OutOfMemory => report.addError("OOM (conflict message)", .{}),
-                        error.WriteFailed => report.signalWriteFailed(),
-                    }
-                    return;
-                };
-            },
+            error.GrammarError => report.failed = true, // Already logged
+            error.OutOfMemory => report.addError("out of memory!\n", .{}),
+            error.ReadFailed => unreachable, // Fixed reader should not fail
+            error.WriteFailed => report.signalWriteFailed(),
         }
-        return;
-    };
-    writer.flush() catch {
-        report.addError("Flushing output stream failed", .{});
         return;
     };
 

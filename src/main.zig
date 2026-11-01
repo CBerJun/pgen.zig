@@ -195,13 +195,9 @@ pub fn main(init: std.process.Init) u8 {
     };
     defer logger.deinit();
 
-    // Prepare diagnostic aggregator
+    // Prepare diagnostic aggregator for CLI
     var aggregator: pgen.diagnostic.Aggregator = .withLogging(gpa);
     defer aggregator.deinit();
-    defer aggregator.printDiagnostics(logger.writer()) catch |err| {
-        logger.check(err);
-    };
-
     var cli = CliParser.init(init, gpa, &aggregator) catch {
         logger.writeLine("OOM (CLI parser)");
         return 1;
@@ -210,6 +206,7 @@ pub fn main(init: std.process.Init) u8 {
 
     if (!cli.go()) {
         logger.writeLine("CLI parsing failed; pass -h to see usage");
+        aggregator.printDiagnostics(logger.writer()) catch |err| logger.check(err);
         return 1;
     }
 
@@ -251,173 +248,19 @@ pub fn main(init: std.process.Init) u8 {
     var out_file_writer = out_file.writer(init.io, write_buffer);
     const writer = &out_file_writer.interface;
 
-    // Tokenize and parse it
-    var tokenizer: pgen.Tokenizer = .{
-        .reader = reader,
-        .payload_allocator = gpa,
-        .scrap_allocator = gpa,
-        .diagnostic_aggregator = &aggregator,
-    };
-    var parser = pgen.psr.Parser.init(gpa) catch |err| switch (err) {
-        error.OutOfMemory => {
-            logger.writeLine("OOM (parser init)");
-            return 1;
-        },
-    };
-    defer parser.deinit(gpa);
-    while (tokenizer.nextToken() catch |err| {
+    const driver: pgen.driver.Driver = .init(gpa, reader, logger.writer(), writer, .{
+        .cst_owns_token = cli.cst_owns_token,
+        .token_extra = &.{cli.token_extra},
+        .dump_cfg = cli.dump_cfg,
+    });
+    driver.go() catch |err| {
         switch (err) {
-            error.InvalidSyntax => logger.writeLine("tokenize failed"), // Details logged by aggregator
-            error.OutOfMemory => logger.writeLine("OOM (in file tokenization)"),
-            error.ReadFailed => logger.writeLine("in file read failed"),
+            error.GrammarError => {}, // Already logged
+            error.OutOfMemory => logger.writeLine("out of memory!"),
+            error.ReadFailed => logger.writeLine("read input failed!"),
+            error.WriteFailed => logger.writeLine("write output/stderr failed!"),
         }
-        return 1;
-    }) |token| {
-        parser.feed(gpa, token) catch |err| {
-            token.deinit(gpa);
-            switch (err) {
-                error.OutOfMemory => logger.writeLine("OOM (in file parsing)"),
-                // TODO: diagnostic
-                error.PgenParseError => logger.writeLine("parse failed"),
-            }
-            return 1;
-        };
-        if (token.tag == .@"$") {
-            // The EOI token does not end up in the CST and needs to be freed
-            // separately.
-            token.deinit(gpa);
-        }
-    }
-    var cst = parser.retrieve();
-    defer cst.deinit(gpa);
-    var cfg_managed, var symbol_spec, var sym_diagnostic = blk: {
-        var ast = pgen.cst2ast.EbnfManaged.fromCst(cst, gpa, gpa, &aggregator) catch |err| {
-            switch (err) {
-                error.OutOfMemory => logger.writeLine("OOM (CST to AST)"),
-                error.Cst2AstSemanticError => logger.writeLine("CST to AST failed"), // Details logged by aggregator
-            }
-            return 1;
-        };
-        defer ast.deinit();
-        var sym_diagnostic = ast.ownedSymDiagnostic();
-        const cfg_managed = pgen.ast2cfg.CfgManaged.fromAst(ast.symbol_spec, ast.productions, &sym_diagnostic, &ast.pool, gpa, gpa) catch {
-            logger.writeLine("OOM (AST to CFG)");
-            return 1;
-        };
-        // We must retain symbol_spec because CFG's is derived from the AST's.
-        break :blk .{ cfg_managed, ast.ownedSymbolSpec(), sym_diagnostic };
-    };
-    defer symbol_spec.deinit(gpa);
-    defer sym_diagnostic.deinit();
-    defer cfg_managed.deinit();
-
-    // Debug dump the CFG
-    if (cli.dump_cfg) {
-        dumpCfg(cfg_managed.symbol_spec, cfg_managed.productions);
-    }
-
-    // Currently just enable SLR backend.
-    var ds: pgen.lr0.DataStructures = .{
-        .allocator = gpa,
-        .symbol_spec = cfg_managed.symbol_spec,
-        .productions = cfg_managed.productions,
-    };
-    defer ds.deinit();
-    const tarjan = ds.getFirstTarjan() catch {
-        logger.writeLine("OOM (FIRST graph Tarjan)");
-        return 1;
-    };
-    const first_reachability = ds.getFirstReachability() catch {
-        logger.writeLine("OOM (FIRST graph reachability)");
-        return 1;
-    };
-    const follow_set = ds.getFollowSet() catch {
-        logger.writeLine("OOM (FOLLOW set)");
-        return 1;
-    };
-    var backend: pgen.backends.SlrBackend(
-        pgen.backends.ZigSwitchActionHandler(void),
-        pgen.backends.ZigSwitchGotoHandler,
-    ) = .{
-        .emitter = .{
-            .out = writer,
-            .cst_owns_token = cli.cst_owns_token,
-            .token_extra = &.{cli.token_extra},
-        },
-        .follow_sets = &follow_set,
-        .action_handler = .{
-            .symbol_spec = &cfg_managed.symbol_spec,
-            .productions = &cfg_managed.productions,
-            .conflict_resolver = {},
-        },
-        .goto_handler = .{},
-    };
-    defer backend.free();
-    pgen.lr0.lr0(
-        cfg_managed.symbol_spec,
-        cfg_managed.productions,
-        tarjan,
-        first_reachability,
-        @TypeOf(backend),
-        &backend,
-        gpa,
-    ) catch |err| {
-        switch (err) {
-            error.OutOfMemory => logger.writeLine("OOM (LR(0) table gen)"),
-            error.WriteFailed => logger.writeLine("Write to output file failed"),
-            error.LrConflict => {
-                logger.writeLine("Table gen conflict! Your grammar is ambiguous OR not SLR-compatible.");
-                const cr = backend.conflict_report.?;
-                pgen.explain.conflict(
-                    gpa,
-                    pgen.lr0.Item,
-                    logger.writer(),
-                    cfg_managed.symbol_spec,
-                    cfg_managed.productions,
-                    sym_diagnostic,
-                    cr,
-                ) catch |err2| {
-                    switch (err2) {
-                        error.OutOfMemory => logger.writeLine("OOM (conflict message)"),
-                        error.WriteFailed => |e| logger.check(e),
-                    }
-                    return 1;
-                };
-            },
-        }
-        return 1;
-    };
-    writer.flush() catch {
-        logger.writeLine("Flushing output stream failed");
         return 1;
     };
     return 0;
-}
-
-fn dumpCfg(symbol_spec: pgen.sym.SymbolSpec, productions: pgen.cfg.CfgProductions) void {
-    std.debug.print("CFG dump (T={}, NT={}/{}, P={}, E=NT{})\n", .{
-        symbol_spec.terminals.count,
-        symbol_spec.nonterminals.count,
-        symbol_spec.nonterminals.node_forming_count,
-        productions.count,
-        symbol_spec.nonterminals.entry,
-    });
-    for (0..symbol_spec.nonterminals.node_forming_count) |nt| {
-        std.debug.print("  NT{}: {s}\n", .{ nt, symbol_spec.nonterminals.names[nt] });
-    }
-    for (0..productions.count) |prod| {
-        std.debug.print("  Prod({}) NT{}:", .{ prod, productions.lhs[prod] });
-        for (productions.rhs[prod]) |sym| {
-            switch (sym) {
-                .terminal => |t| std.debug.print(" T{}", .{t}),
-                .nonterminal => |nt| std.debug.print(" NT{}", .{nt}),
-            }
-        }
-        std.debug.print("\n", .{});
-    }
-    std.debug.print("Pact:", .{});
-    for (productions.pact[0..symbol_spec.nonterminals.count]) |pact| {
-        std.debug.print(" {}", .{pact});
-    }
-    std.debug.print("\n", .{});
 }
