@@ -58,6 +58,23 @@ const Logger = struct {
     }
 };
 
+const ParsedArgs = struct {
+    allocator: std.mem.Allocator,
+    // These specify the default values.
+    cst_owns_token: bool = false,
+    token_extra: []u8 = &.{},
+    in_file_path: []u8 = &.{},
+    out_file_path: []u8 = &.{},
+    dump_cfg: bool = false,
+
+    pub fn deinit(self: *@This()) void {
+        self.allocator.free(self.token_extra);
+        self.allocator.free(self.in_file_path);
+        self.allocator.free(self.out_file_path);
+        self.* = undefined;
+    }
+};
+
 const CliParser = struct {
     iterator: std.process.Args.Iterator,
     /// Allocator for string options
@@ -65,16 +82,14 @@ const CliParser = struct {
     /// CLI errors use aggregator too
     aggregator: *pgen.diagnostic.Aggregator,
 
-    // Following are parsed option values, owned by this struct
-    cst_owns_token: bool = false,
-    token_extra: []u8 = &.{},
-    in_file_path: []u8 = &.{},
-    out_file_path: []u8 = &.{},
-    dump_cfg: bool = false,
+    pub const Error = std.mem.Allocator.Error || error{
+        CliParseError,
+    };
 
     pub fn init(process_init: std.process.Init, allocator: std.mem.Allocator, aggregator: *pgen.diagnostic.Aggregator) std.mem.Allocator.Error!@This() {
+        const iterator = try process_init.minimal.args.iterateAllocator(allocator);
         return .{
-            .iterator = try process_init.minimal.args.iterateAllocator(allocator),
+            .iterator = iterator,
             .allocator = allocator,
             .aggregator = aggregator,
         };
@@ -82,18 +97,18 @@ const CliParser = struct {
 
     pub fn deinit(self: *@This()) void {
         self.iterator.deinit();
-        self.allocator.free(self.token_extra);
-        self.allocator.free(self.in_file_path);
-        self.allocator.free(self.out_file_path);
         self.* = undefined;
     }
 
-    /// Run the parser, return successful or not
-    pub fn go(self: *@This()) bool {
+    /// Run the parser; for `error.CliParseError` we log the message into
+    /// aggregator.
+    pub fn go(self: *@This()) Error!ParsedArgs {
+        var ans: ParsedArgs = .{ .allocator = self.allocator };
+        errdefer ans.deinit();
         // Skip argv[0]
         if (!self.iterator.skip()) {
             self.aggregator.add(.fatal, "expected argv[0] to exist", .{});
-            return false;
+            return error.CliParseError;
         }
         var end_of_options = false; // Reached forced end of option "--"
         while (self.iterator.next()) |arg| {
@@ -103,12 +118,9 @@ const CliParser = struct {
             }
             if (arg[0] != '-' or end_of_options) {
                 // Non-option, treat as input file
-                self.in_file_path = self.allocator.dupe(u8, arg) catch {
-                    self.aggregator.add(.fatal, "OOM (dupe in file path)", .{});
-                    return false;
-                };
+                ans.in_file_path = try self.allocator.dupe(u8, arg);
                 if (self.iterator.skip()) {
-                    self.aggregator.add(.warning, "ignoring CLI arguments after {s}", .{self.in_file_path});
+                    self.aggregator.add(.warning, "ignoring CLI arguments after {s}", .{ans.in_file_path});
                 }
                 break;
             }
@@ -117,34 +129,28 @@ const CliParser = struct {
             if (std.mem.eql(u8, rest, "-")) {
                 end_of_options = true;
             } else if (std.mem.eql(u8, rest, "cst-owns-token")) {
-                self.cst_owns_token = true;
+                ans.cst_owns_token = true;
             } else if (std.mem.eql(u8, rest, "token-extra")) {
-                if (self.token_extra.len > 0) {
+                if (ans.token_extra.len > 0) {
                     self.aggregator.add(.fatal, "-token-extra already set", .{});
-                    return false;
+                    return error.CliParseError;
                 }
                 if (self.iterator.next()) |payload| {
-                    self.token_extra = self.allocator.dupe(u8, payload) catch {
-                        self.aggregator.add(.fatal, "OOM (dupe -token-extra)", .{});
-                        return false;
-                    };
+                    ans.token_extra = try self.allocator.dupe(u8, payload);
                 } else {
                     self.aggregator.add(.fatal, "expected parameter following -token-extra", .{});
-                    return false;
+                    return error.CliParseError;
                 }
             } else if (std.mem.eql(u8, rest, "o") or std.mem.eql(u8, rest, "out")) {
-                if (self.out_file_path.len > 0) {
+                if (ans.out_file_path.len > 0) {
                     self.aggregator.add(.fatal, "-o/-out already set", .{});
-                    return false;
+                    return error.CliParseError;
                 }
                 if (self.iterator.next()) |payload| {
-                    self.out_file_path = self.allocator.dupe(u8, payload) catch {
-                        self.aggregator.add(.fatal, "OOM (dupe -o/-out)", .{});
-                        return false;
-                    };
+                    ans.out_file_path = try self.allocator.dupe(u8, payload);
                 } else {
                     self.aggregator.add(.fatal, "expected parameter following -o/-out", .{});
-                    return false;
+                    return error.CliParseError;
                 }
             } else if (std.mem.eql(u8, rest, "h")) {
                 std.debug.print(
@@ -162,17 +168,17 @@ const CliParser = struct {
                     \\
                 , .{});
             } else if (std.mem.eql(u8, rest, "dump-cfg")) {
-                self.dump_cfg = true;
+                ans.dump_cfg = true;
             } else {
                 self.aggregator.add(.fatal, "unrecognized argument -{s}", .{rest});
-                return false;
+                return error.CliParseError;
             }
         }
-        if (self.in_file_path.len == 0) {
+        if (ans.in_file_path.len == 0) {
             self.aggregator.add(.fatal, "expected input grammar path", .{});
-            return false;
+            return error.CliParseError;
         }
-        return true;
+        return ans;
     }
 };
 
@@ -195,20 +201,28 @@ pub fn main(init: std.process.Init) u8 {
     };
     defer logger.deinit();
 
-    // Prepare diagnostic aggregator for CLI
-    var aggregator: pgen.diagnostic.Aggregator = .withLogging(gpa);
-    defer aggregator.deinit();
-    var cli = CliParser.init(init, gpa, &aggregator) catch {
-        logger.writeLine("OOM (CLI parser)");
-        return 1;
+    var cli = blk: {
+        // Prepare a diagnostic aggregator for CLI
+        var aggregator: pgen.diagnostic.Aggregator = .withLogging(gpa);
+        defer aggregator.deinit();
+        var cli_parser = CliParser.init(init, gpa, &aggregator) catch {
+            logger.writeLine("OOM (CLI parser init)");
+            return 1;
+        };
+        defer cli_parser.deinit();
+        break :blk cli_parser.go() catch |err| switch (err) {
+            error.CliParseError => {
+                logger.writeLine("CLI parsing failed; pass -h to see usage");
+                aggregator.printDiagnostics(logger.writer()) catch |err2| logger.check(err2);
+                return 1;
+            },
+            error.OutOfMemory => {
+                logger.writeLine("OOM (CLI parse)");
+                return 1;
+            },
+        };
     };
     defer cli.deinit();
-
-    if (!cli.go()) {
-        logger.writeLine("CLI parsing failed; pass -h to see usage");
-        aggregator.printDiagnostics(logger.writer()) catch |err| logger.check(err);
-        return 1;
-    }
 
     // Read the in file (grammar description)
     const in_file = std.Io.Dir.cwd().openFile(init.io, cli.in_file_path, .{ .allow_directory = false }) catch |err| {
