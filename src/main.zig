@@ -14,6 +14,7 @@ const ParsedArgs = struct {
     in_file_path: []u8 = &.{},
     out_file_path: []u8 = &.{},
     dump_cfg: bool = false,
+    help: bool = false,
 
     pub fn deinit(self: *@This()) void {
         self.allocator.free(self.token_extra);
@@ -29,6 +30,21 @@ const CliParser = struct {
     allocator: std.mem.Allocator,
     /// CLI errors use aggregator too
     aggregator: *pgen.diagnostic.Aggregator,
+
+    pub const help_message =
+        \\Usage: pgenzig [options] in_file
+        \\
+        \\Option list:
+        \\    --                End of option list signal
+        \\    -o/-out FILE      Output file
+        \\    -cst-owns-token   If set, `CSTNode`s will own the passed in tokens. There is implication on mem management. See generated source's doc.
+        \\    -token-extra CODE Extra source code to add into the `Token` struct
+        \\    -h                Print this message and exit
+        \\
+        \\Debug options for developers:
+        \\    -dump-cfg         Dump generated CFG
+        \\
+    ;
 
     pub const Error = std.mem.Allocator.Error || error{
         CliParseError,
@@ -101,20 +117,7 @@ const CliParser = struct {
                     return error.CliParseError;
                 }
             } else if (std.mem.eql(u8, rest, "h")) {
-                std.debug.print(
-                    \\Usage: pgenzig [options] in_file
-                    \\
-                    \\Option list:
-                    \\    --                End of option list signal
-                    \\    -o/-out FILE      Output file
-                    \\    -cst-owns-token   If set, CSTNodes will own the passed in tokens. There is implication on mem management. See generated source's doc.
-                    \\    -token-extra CODE Extra source code to add into the Token struct.
-                    \\    -h                Print this message
-                    \\
-                    \\Debug option for developers:
-                    \\    -dump-cfg         Dump generated CFG
-                    \\
-                , .{});
+                ans.help = true;
             } else if (std.mem.eql(u8, rest, "dump-cfg")) {
                 ans.dump_cfg = true;
             } else {
@@ -122,7 +125,7 @@ const CliParser = struct {
                 return error.CliParseError;
             }
         }
-        if (ans.in_file_path.len == 0) {
+        if (ans.in_file_path.len == 0 and !ans.help) {
             self.aggregator.add(.fatal, "expected input grammar path", .{});
             return error.CliParseError;
         }
@@ -146,6 +149,11 @@ fn mainInner(init: std.process.Init, gpa: std.mem.Allocator, stderr: *std.Io.Wri
         };
     };
     defer cli.deinit();
+
+    if (cli.help) {
+        try stderr.writeAll(CliParser.help_message);
+        return;
+    }
 
     // Read in file (grammar description)
     const in_file = std.Io.Dir.cwd().openFile(init.io, cli.in_file_path, .{ .allow_directory = false }) catch |err| {
