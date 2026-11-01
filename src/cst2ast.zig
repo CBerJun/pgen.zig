@@ -5,14 +5,16 @@ const ast = pgen_core.ast;
 const sym = pgen_core.sym;
 const diagnostic = pgen_core.diagnostic;
 
-/// Managed `ast.Ebnf` with an arena allocator and `ExprPool` which holds
+/// Managed `ast.Ebnf` with arena allocators and `ExprPool` which holds
 /// the rhs EBNF nodes. This won't work if you have multiple `ast.Ebnf`s
-/// sharing a pool. The allocation is split into two allocators since the
-/// AST-to-CFG stage may reuse `Nonterminals` and `Terminals` objects for
-/// CFG.
+/// sharing a pool. The allocation is split into multiple allocators since
+/// the generated artifacts can have different lifetime, particularly: the
+/// AST-to-CFG stage may reuse `Nonterminals` and `Terminals` objects for CFG.
 pub const EbnfManaged = struct {
     symbol_spec: sym.SymbolSpec,
     productions: ast.EbnfProductions,
+    /// `sym_diagnostic` uses the `allocator` directly.
+    sym_diagnostic: ?sym.DiagnosticInfo,
     /// The pool from which all `Expr`s in `productions` are interned.
     pool: ast.ExprPool,
     /// The arena for `productions` and `pool`.
@@ -50,10 +52,19 @@ pub const EbnfManaged = struct {
         const expr_allocator = expr_arena.allocator();
         var pool: ast.ExprPool = .init(expr_allocator);
         errdefer pool.deinit(); // In fact unnecessary
-        const symbol_spec, const productions = try cstToEbnf(cst, &pool, expr_allocator, symbol_arena.allocator(), scrap_allocator, aggregator);
+        const symbol_spec, const productions, const sym_diagnostic = try cstToEbnf(
+            cst,
+            &pool,
+            expr_allocator,
+            symbol_arena.allocator(),
+            allocator,
+            scrap_allocator,
+            aggregator,
+        );
         return .{
             .symbol_spec = symbol_spec,
             .productions = productions,
+            .sym_diagnostic = sym_diagnostic,
             .expr_arena = expr_arena,
             .symbol_arena = symbol_arena,
             .pool = pool,
@@ -81,11 +92,21 @@ pub const EbnfManaged = struct {
         return .{ .arena = self.symbol_arena.?, .symbol_spec = self.symbol_spec };
     }
 
+    /// Transfer `sym_diagnostic`'s ownership.
+    pub fn ownedSymDiagnostic(self: *@This()) sym.DiagnosticInfo {
+        defer self.sym_diagnostic = null;
+        return self.sym_diagnostic.?;
+    }
+
     pub fn deinit(self: *@This()) void {
         self.deinitExpr();
         if (self.symbol_arena) |arena| {
             arena.deinit();
             self.allocator.destroy(arena);
+        }
+        if (self.sym_diagnostic) |sd| {
+            var sd_ = sd;
+            sd_.deinit();
         }
         self.* = undefined;
     }
@@ -96,13 +117,13 @@ pub const SemanticError = error{
 };
 
 /// Convert grammar CST to intermediate EBNF form, allocating memory using
-/// `expr_allocator` (for `EbnfProductions`) and `symbol_allocator`
-/// (for `SymbolSpec`). Memory owned by CST (including tokens) are not freed
-/// or reused. It is OK and encouraged to pass in an arena allocator for
-/// `expr_allocator` or `symbol_allocator`. Do not pass in an arena for
-/// `scrap_allocator`. On error, it is not possible to remove already-interned
+/// `expr_allocator` (for `EbnfProductions`), `symbol_allocator`
+/// (for `SymbolSpec`), `sym_diagnostic_allocator` (for `DiagnosticInfo`).
+/// Memory owned by CST (including tokens) are not freed or reused. It is OK
+/// and encouraged to pass in arena allocators for `expr_allocator` or
+/// `symbol_allocator`. On error, it is not possible to remove already-interned
 /// expressions in `pool`.
-pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.Allocator, symbol_allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator, aggregator: *diagnostic.Aggregator) (SemanticError || std.mem.Allocator.Error)!struct { sym.SymbolSpec, ast.EbnfProductions } {
+pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.Allocator, symbol_allocator: std.mem.Allocator, sym_diagnostic_allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator, aggregator: *diagnostic.Aggregator) (SemanticError || std.mem.Allocator.Error)!struct { sym.SymbolSpec, ast.EbnfProductions, sym.DiagnosticInfo } {
     // Pass 1: Collect terminals and nonterminals
     var named_terminals_map: std.StringHashMapUnmanaged(u32) = .empty;
     defer named_terminals_map.deinit(scrap_allocator); // Strings are borrowed
@@ -284,6 +305,8 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.
             symbol_allocator.free(name);
         symbol_allocator.free(node_forming_nt_names);
     }
+    var sym_diagnostic = try sym.DiagnosticInfo.init(sym_diagnostic_allocator, nonterminal_count - node_forming_nt_count);
+    errdefer sym_diagnostic.deinit();
     {
         var ids: [2]u32 = .{ 0, node_forming_nt_count };
         var it = nonterminals_map.iterator();
@@ -295,6 +318,8 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.
             entry.value_ptr.* = id;
             if (id < node_forming_nt_count) {
                 node_forming_nt_names[id] = try symbol_allocator.dupe(u8, entry.key_ptr.*);
+            } else {
+                sym_diagnostic.nodeless_nt_names[id - node_forming_nt_count] = try sym_diagnostic_allocator.dupe(u8, entry.key_ptr.*);
             }
             id_ptr.* += 1;
         }
@@ -411,7 +436,7 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.
             .node_forming_count = node_forming_nt_count,
             .names = node_forming_nt_names.ptr,
         },
-    }, productions.ptr };
+    }, productions.ptr, sym_diagnostic };
 }
 
 /// Convenience function for `cstToEbnf`.

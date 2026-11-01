@@ -136,7 +136,7 @@ export fn pgenParse(
     }
     var cst = parser.retrieve();
     defer cst.deinit(gpa);
-    var cfg_managed, var symbol_spec = blk: {
+    var cfg_managed, var symbol_spec, var sym_diagnostic = blk: {
         var ast = pgen.cst2ast.EbnfManaged.fromCst(cst, gpa, gpa, &aggregator) catch |err| {
             switch (err) {
                 error.OutOfMemory => report.addError("OOM (CST to AST)\n", .{}),
@@ -147,12 +147,15 @@ export fn pgenParse(
             return;
         };
         defer ast.deinit();
-        break :blk .{ pgen.ast2cfg.CfgManaged.fromAst(ast.symbol_spec, ast.productions, &ast.pool, gpa, gpa) catch {
+        var sym_diagnostic = ast.ownedSymDiagnostic();
+        const cfg_managed = pgen.ast2cfg.CfgManaged.fromAst(ast.symbol_spec, ast.productions, &sym_diagnostic, &ast.pool, gpa, gpa) catch {
             report.addError("OOM (AST to CFG)", .{});
             return;
-        }, ast.ownedSymbolSpec() };
+        };
+        break :blk .{ cfg_managed, ast.ownedSymbolSpec(), sym_diagnostic };
     };
     defer symbol_spec.deinit(gpa);
+    defer sym_diagnostic.deinit();
     defer cfg_managed.deinit();
 
     // Currently just enable SLR backend.
@@ -219,6 +222,7 @@ export fn pgenParse(
                     report.writer(),
                     cfg_managed.symbol_spec,
                     cfg_managed.productions,
+                    sym_diagnostic,
                     cr,
                 ) catch |err2| {
                     switch (err2) {

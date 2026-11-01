@@ -1,5 +1,6 @@
 //! Symbols related definitions, common to AST (EBNF) and CFG forms.
 //! Nonterminals, terminals, entry, etc.
+const std = @import("std");
 
 /// Labelling of nonterminals and terminals.
 pub const SymbolSpec = struct {
@@ -41,13 +42,39 @@ pub const Nonterminals = struct {
     /// without `nodeless` qualifier; they form tree nodes in CST). These
     /// nonterminals are always labelled from 0 to this quantity minus 1.
     node_forming_count: u32,
-    /// Nonterminal names given by user. Length is always
-    /// `node_forming_count`. We don't store names for nodeless
-    /// nonterminals.
+    /// Nonterminal names given by user. Length is always `node_forming_count`.
     names: [*]const []const u8,
 
     /// Check if a nonterminal is node-forming
     pub fn isNodeForming(self: @This(), nt: u32) bool {
         return nt < self.node_forming_count;
+    }
+};
+
+/// Additional facts in a `SymbolSpec` for diagnostic purposes. The meta CFG
+/// does not include this, so this struct follows the usual memory management
+/// scheme.
+pub const DiagnosticInfo = struct {
+    /// Names for nodeless nts. Length is <= `count - node_forming_count`.
+    nodeless_nt_names: [][]const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, nodeless_nt_count: u32) std.mem.Allocator.Error!@This() {
+        var self: @This() = .{
+            .nodeless_nt_names = &.{},
+            .allocator = allocator,
+        };
+        errdefer self.deinit();
+        self.nodeless_nt_names = try allocator.alloc([]const u8, nodeless_nt_count);
+        // Fill with empty slice to allow deinit to clean up properly.
+        @memset(self.nodeless_nt_names, &[0]u8{});
+        return self;
+    }
+
+    pub fn deinit(self: *@This()) void {
+        for (self.nodeless_nt_names) |name| {
+            self.allocator.free(name);
+        }
+        self.allocator.free(self.nodeless_nt_names);
     }
 };

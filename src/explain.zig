@@ -9,17 +9,19 @@ const pgen_core = @import("pgen_core");
 const NonterminalExplainer = struct {
     symbol_spec: pgen_core.sym.SymbolSpec,
     productions: pgen_core.cfg.CfgProductions,
+    /// Having the diagnostic gives more readable explanation.
+    sym_diagnostic: ?pgen_core.sym.DiagnosticInfo,
     /// Whether or not to include each nt in explanation.
     /// Length is **the number of non-node-forming nts**.
     include: std.DynamicBitSetUnmanaged,
     /// Length is `symbol_spec.terminals.literal.len`. See `writeToken`.
     literal_token_thresholds: [*]u32,
+    user_nt_count: u32,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, symbol_spec: pgen_core.sym.SymbolSpec, productions: pgen_core.cfg.CfgProductions) std.mem.Allocator.Error!@This() {
-        // TODO: nodeless nt names should be used instead of treating them like
-        // aux nts.
-        var include = try std.DynamicBitSetUnmanaged.initEmpty(allocator, symbol_spec.nonterminals.count - symbol_spec.nonterminals.node_forming_count);
+    pub fn init(allocator: std.mem.Allocator, symbol_spec: pgen_core.sym.SymbolSpec, productions: pgen_core.cfg.CfgProductions, sym_diagnostic: ?pgen_core.sym.DiagnosticInfo) std.mem.Allocator.Error!@This() {
+        const user_nt_count = symbol_spec.nonterminals.node_forming_count + (if (sym_diagnostic) |sd| @as(u32, @intCast(sd.nodeless_nt_names.len)) else 0);
+        var include = try std.DynamicBitSetUnmanaged.initEmpty(allocator, symbol_spec.nonterminals.count - user_nt_count);
         errdefer include.deinit(allocator);
         var literal_token_thresholds = try allocator.alloc(u32, symbol_spec.terminals.literal.len);
         errdefer allocator.free(literal_token_thresholds);
@@ -31,8 +33,10 @@ const NonterminalExplainer = struct {
         return .{
             .symbol_spec = symbol_spec,
             .productions = productions,
+            .sym_diagnostic = sym_diagnostic,
             .include = include,
             .literal_token_thresholds = literal_token_thresholds.ptr,
+            .user_nt_count = user_nt_count,
             .allocator = allocator,
         };
     }
@@ -44,8 +48,7 @@ const NonterminalExplainer = struct {
     }
 
     fn slotOf(self: @This(), nt: u32) ?u32 {
-        const nfc = self.symbol_spec.nonterminals.node_forming_count;
-        return if (nt >= nfc) nt - nfc else null;
+        return if (nt >= self.user_nt_count) nt - self.user_nt_count else null;
     }
 
     /// Add an nt to explanation, and all nts that it relies on recursively.
@@ -73,7 +76,8 @@ const NonterminalExplainer = struct {
 
     /// Write a single nonterminal in a user readable way.
     pub fn writeNt(self: @This(), writer: *std.Io.Writer, nt: u32) std.Io.Writer.Error!void {
-        try if (self.slotOf(nt)) |slot| writer.print("#{}", .{slot}) else writer.writeAll(self.symbol_spec.nonterminals.names[nt]);
+        const nfc = self.symbol_spec.nonterminals.node_forming_count;
+        try if (self.slotOf(nt)) |slot| writer.print("#{}", .{slot}) else writer.writeAll(if (nt < nfc) self.symbol_spec.nonterminals.names[nt] else self.sym_diagnostic.?.nodeless_nt_names[nt - nfc]);
     }
 
     /// Write a single terminal in a user readable way. This takes a non-O(1)
@@ -166,7 +170,7 @@ const NonterminalExplainer = struct {
         try writer.writeAll("Auxiliary CFG nonterminals:\n");
         var it = self.include.iterator(.{});
         while (it.next()) |slot| {
-            var it2 = self.productions.of(self.symbol_spec, @intCast(slot + self.symbol_spec.nonterminals.node_forming_count));
+            var it2 = self.productions.of(self.symbol_spec, @intCast(slot + self.user_nt_count));
             while (it2.next()) |rule| {
                 try writer.writeAll("  ");
                 try self.writeProduction(writer, rule);
@@ -182,9 +186,10 @@ pub fn conflict(
     writer: *std.Io.Writer,
     symbol_spec: pgen_core.sym.SymbolSpec,
     productions: pgen_core.cfg.CfgProductions,
+    sym_diagnostic: ?pgen_core.sym.DiagnosticInfo,
     report: pgen_core.backends.ReportedConflict(Item),
 ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
-    var nt_explain = try NonterminalExplainer.init(scrap_allocator, symbol_spec, productions);
+    var nt_explain = try NonterminalExplainer.init(scrap_allocator, symbol_spec, productions, sym_diagnostic);
     defer nt_explain.deinit();
     try writer.writeAll("Conflict at state with core set:\n");
     for (report.core_set) |core_item| {

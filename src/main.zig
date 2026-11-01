@@ -290,7 +290,7 @@ pub fn main(init: std.process.Init) u8 {
     }
     var cst = parser.retrieve();
     defer cst.deinit(gpa);
-    var cfg_managed, var symbol_spec = blk: {
+    var cfg_managed, var symbol_spec, var sym_diagnostic = blk: {
         var ast = pgen.cst2ast.EbnfManaged.fromCst(cst, gpa, gpa, &aggregator) catch |err| {
             switch (err) {
                 error.OutOfMemory => logger.writeLine("OOM (CST to AST)"),
@@ -299,12 +299,16 @@ pub fn main(init: std.process.Init) u8 {
             return 1;
         };
         defer ast.deinit();
-        break :blk .{ pgen.ast2cfg.CfgManaged.fromAst(ast.symbol_spec, ast.productions, &ast.pool, gpa, gpa) catch {
+        var sym_diagnostic = ast.ownedSymDiagnostic();
+        const cfg_managed = pgen.ast2cfg.CfgManaged.fromAst(ast.symbol_spec, ast.productions, &sym_diagnostic, &ast.pool, gpa, gpa) catch {
             logger.writeLine("OOM (AST to CFG)");
             return 1;
-        }, ast.ownedSymbolSpec() };
+        };
+        // We must retain symbol_spec because CFG's is derived from the AST's.
+        break :blk .{ cfg_managed, ast.ownedSymbolSpec(), sym_diagnostic };
     };
     defer symbol_spec.deinit(gpa);
+    defer sym_diagnostic.deinit();
     defer cfg_managed.deinit();
 
     // Debug dump the CFG
@@ -370,6 +374,7 @@ pub fn main(init: std.process.Init) u8 {
                     logger.writer(),
                     cfg_managed.symbol_spec,
                     cfg_managed.productions,
+                    sym_diagnostic,
                     cr,
                 ) catch |err2| {
                     switch (err2) {

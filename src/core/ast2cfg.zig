@@ -46,14 +46,15 @@ pub const CfgManaged = struct {
     /// Owner of `arena`.
     allocator: std.mem.Allocator,
 
-    pub fn fromAst(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
+    /// `sym_diagnostic` is modified *in place* if given.
+    pub fn fromAst(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, sym_diagnostic: ?*sym.DiagnosticInfo, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
         var arena = try allocator.create(std.heap.ArenaAllocator);
         arena.* = .init(allocator);
         errdefer {
             arena.deinit();
             allocator.destroy(arena);
         }
-        const new_symbol_spec, const cfg_productions = try astToCfg(symbol_spec, productions, pool, arena.allocator(), scrap_allocator);
+        const new_symbol_spec, const cfg_productions = try astToCfg(symbol_spec, productions, sym_diagnostic, pool, arena.allocator(), scrap_allocator);
         return .{
             .symbol_spec = new_symbol_spec,
             .productions = cfg_productions,
@@ -73,6 +74,7 @@ pub const CfgManaged = struct {
 const AstToCfg = struct {
     symbol_spec: sym.SymbolSpec,
     productions: ast.EbnfProductions,
+    sym_diagnostic: ?*sym.DiagnosticInfo,
     pool: *ast.ExprPool,
 
     allocator: std.mem.Allocator,
@@ -95,10 +97,11 @@ const AstToCfg = struct {
         target: u32,
     };
 
-    pub fn init(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) @This() {
+    pub fn init(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, sym_diagnostic: ?*sym.DiagnosticInfo, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) @This() {
         return .{
             .symbol_spec = symbol_spec,
             .productions = productions,
+            .sym_diagnostic = sym_diagnostic,
             .pool = pool,
             .allocator = allocator,
             .scrap_allocator = scrap_allocator,
@@ -553,29 +556,38 @@ const AstToCfg = struct {
         // For nts, we can't delete node forming ones because they are named
         // and always part of the generated `Nonterminal` enum. We could delete
         // non node forming ones but that would require relabelling nts.
-        {
+        // If we relabel nts, we'll need to also update `sym_diagnostic`.
+        nt_deletion: {
             const node_forming_cnt = self.symbol_spec.nonterminals.node_forming_count;
+            const non_node_forming_cnt = self.aux_nt - node_forming_cnt;
+            if (non_node_forming_cnt == 0)
+                break :nt_deletion;
             // Each nt is relabelled by subtracting its ID by the number of
             // unproductive nts that have an ID less than it. We can precompute
             // that (build a prefix sum array).
-            var psa = try self.scrap_allocator.alloc(u32, self.aux_nt - node_forming_cnt);
+            var psa = try self.scrap_allocator.alloc(u32, non_node_forming_cnt);
             defer self.scrap_allocator.free(psa);
             @memset(psa, 0);
-            var it = reachable.iterator(.{
-                .kind = .unset,
-                // Reverse so that non node forming nts come first; we can stop
-                // immediately once reached a node forming nt
-                .direction = .reverse,
-            });
-            while (it.next()) |nt| {
-                if (nt < node_forming_cnt)
-                    break;
-                psa[nt - node_forming_cnt] = 1;
+            {
+                var it = reachable.iterator(.{
+                    .kind = .unset,
+                    // Reverse so that non node forming nts come first; we can stop
+                    // immediately once reached a node forming nt
+                    .direction = .reverse,
+                });
+                while (it.next()) |nt| {
+                    if (nt < node_forming_cnt)
+                        break;
+                    psa[nt - node_forming_cnt] = 1;
+                }
             }
             // Now run prefix sum
             for (1..psa.len) |i| {
                 psa[i] += psa[i - 1];
             }
+            const n_deleted = psa[psa.len - 1];
+            if (n_deleted == 0)
+                break :nt_deletion;
             // Rewrite all the nts in productions
             // Unproductive nts themselves must not appear anywhere since
             // those productions that use them must be unproductive, and
@@ -596,8 +608,29 @@ const AstToCfg = struct {
                 }
             }
             // Don't forget to adjust the number of aux nts.
-            if (psa.len > 0)
-                self.aux_nt -= psa[psa.len - 1];
+            self.aux_nt -= n_deleted;
+            // Update `sym_diagnostic.nodeless_nt_names`
+            // Each node moves towards the front of list by the number in `psa`.
+            if (self.sym_diagnostic) |sd| {
+                const n = sd.nodeless_nt_names.len;
+                var n_user_deleted: u32 = 0;
+                for (0..n) |i| {
+                    const nt = i + node_forming_cnt;
+                    const orig = &sd.nodeless_nt_names[i];
+                    if (!reachable.isSet(nt)) {
+                        sd.allocator.free(orig.*);
+                        n_user_deleted += 1;
+                        orig.* = &.{}; // Prevent double-free on error
+                        continue;
+                    }
+                    const offset = psa[i];
+                    if (offset > 0) {
+                        sd.nodeless_nt_names[i - offset] = orig.*;
+                        orig.* = &.{}; // Prevent double-free on error
+                    }
+                }
+                sd.nodeless_nt_names = try sd.allocator.realloc(sd.nodeless_nt_names, n - n_user_deleted);
+            }
         }
     }
 };
@@ -632,9 +665,9 @@ const ProductionsManager = struct {
 };
 
 /// This mutates states in the `pool`'s entries, so it is not safe for
-/// concurrent use.
-pub fn astToCfg(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { sym.SymbolSpec, cfg.CfgProductions } {
-    var ast2cfg: AstToCfg = .init(symbol_spec, productions, pool, allocator, scrap_allocator);
+/// concurrent use. Mutates `sym_diagnostic` in place.
+pub fn astToCfg(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, sym_diagnostic: ?*sym.DiagnosticInfo, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { sym.SymbolSpec, cfg.CfgProductions } {
+    var ast2cfg: AstToCfg = .init(symbol_spec, productions, sym_diagnostic, pool, allocator, scrap_allocator);
     defer ast2cfg.deinit();
     try ast2cfg.pass1();
     try ast2cfg.pass2();
