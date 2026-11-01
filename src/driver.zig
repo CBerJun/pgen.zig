@@ -116,7 +116,7 @@ pub const Driver = struct {
         defer cfg_managed.deinit();
 
         if (self.config.dump_cfg)
-            try dumpCfg(self.stderr, cfg_managed.symbol_spec, cfg_managed.productions);
+            try explain.cfg(self.allocator, self.stderr, cfg_managed.symbol_spec, cfg_managed.productions, sym_diagnostic);
 
         var ds: pgen_core.lr0.DataStructures = .{
             .allocator = self.allocator,
@@ -189,31 +189,3 @@ pub const Driver = struct {
         try self.output.flush();
     }
 };
-
-fn dumpCfg(out: *std.Io.Writer, symbol_spec: pgen_core.sym.SymbolSpec, productions: pgen_core.cfg.CfgProductions) std.Io.Writer.Error!void {
-    try out.print("CFG dump (T={}, NT={}/{}, P={}, E=NT{})\n", .{
-        symbol_spec.terminals.count,
-        symbol_spec.nonterminals.count,
-        symbol_spec.nonterminals.node_forming_count,
-        productions.count,
-        symbol_spec.nonterminals.entry,
-    });
-    for (0..symbol_spec.nonterminals.node_forming_count) |nt| {
-        try out.print("  NT{}: {s}\n", .{ nt, symbol_spec.nonterminals.names[nt] });
-    }
-    for (0..productions.count) |prod| {
-        try out.print("  Prod({}) NT{}:", .{ prod, productions.lhs[prod] });
-        for (productions.rhs[prod]) |sym| {
-            try switch (sym) {
-                .terminal => |t| out.print(" T{}", .{t}),
-                .nonterminal => |nt| out.print(" NT{}", .{nt}),
-            };
-        }
-        try out.writeByte('\n');
-    }
-    try out.writeAll("Pact:");
-    for (productions.pact[0..symbol_spec.nonterminals.count]) |pact| {
-        try out.print(" {}", .{pact});
-    }
-    try out.writeByte('\n');
-}
