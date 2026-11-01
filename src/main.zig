@@ -6,58 +6,6 @@ var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 const BUFFER_SIZE = 4096;
 
-const Logger = struct {
-    io: std.Io,
-    file: std.Io.File,
-    allocator: std.mem.Allocator,
-    buffer: []u8,
-    file_writer: std.Io.File.Writer,
-
-    pub fn init(init_: std.process.Init, allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
-        const buffer = try allocator.alloc(u8, BUFFER_SIZE);
-        const stderr = std.Io.File.stderr();
-        return .{
-            .io = init_.io,
-            .file = stderr,
-            .allocator = allocator,
-            .buffer = buffer,
-            .file_writer = stderr.writer(init_.io, buffer),
-        };
-    }
-
-    pub fn writer(self: *@This()) *std.Io.Writer {
-        return &self.file_writer.interface;
-    }
-
-    pub fn check(_: @This(), err_union: std.Io.Writer.Error!void) void {
-        err_union catch {
-            std.debug.print("writing to stderr failed\n", .{});
-        };
-    }
-
-    pub fn deinit(self: *@This()) void {
-        self.file_writer.flush() catch |err| {
-            std.debug.print("writing to stderr failed ({s})", .{@errorName(err)});
-        };
-        self.allocator.free(self.buffer);
-        self.* = undefined;
-    }
-
-    pub fn printLine(self: *@This(), comptime fmt: []const u8, args: anytype) void {
-        self.check(self.writer().print(fmt, args));
-        self.check(self.writer().writeByte('\n'));
-    }
-
-    pub fn write(self: *@This(), str: []const u8) void {
-        self.check(self.writer().writeAll(str));
-    }
-
-    pub fn writeLine(self: *@This(), str: []const u8) void {
-        self.check(self.writer().writeAll(str));
-        self.check(self.writer().writeByte('\n'));
-    }
-};
-
 const ParsedArgs = struct {
     allocator: std.mem.Allocator,
     // These specify the default values.
@@ -182,6 +130,66 @@ const CliParser = struct {
     }
 };
 
+fn mainInner(init: std.process.Init, gpa: std.mem.Allocator, stderr: *std.Io.Writer) error{ OutOfMemory, ReadFailed, WriteFailed, UserError }!void {
+    var cli = blk: {
+        var aggregator: pgen.diagnostic.Aggregator = .withLogging(gpa);
+        defer aggregator.deinit();
+        var cli_parser = try CliParser.init(init, gpa, &aggregator);
+        defer cli_parser.deinit();
+        break :blk cli_parser.go() catch |err| switch (err) {
+            error.CliParseError => {
+                try stderr.writeAll("CLI parsing failed; pass -h to see usage\n");
+                try aggregator.printDiagnostics(stderr);
+                return error.UserError;
+            },
+            else => |e| return e,
+        };
+    };
+    defer cli.deinit();
+
+    // Read in file (grammar description)
+    const in_file = std.Io.Dir.cwd().openFile(init.io, cli.in_file_path, .{ .allow_directory = false }) catch |err| {
+        try stderr.print("failed to open in file: {s}\n", .{@errorName(err)});
+        return error.UserError;
+    };
+    defer in_file.close(init.io);
+
+    // Invent an out file path if not specified
+    if (cli.out_file_path.len == 0) {
+        const suffix = ".zig";
+        cli.out_file_path = try cli.allocator.alloc(u8, cli.in_file_path.len + suffix.len);
+        @memcpy(cli.out_file_path[0..cli.in_file_path.len], cli.in_file_path);
+        @memcpy(cli.out_file_path[cli.in_file_path.len..], suffix);
+    }
+
+    // Open output file
+    const out_file = std.Io.Dir.cwd().createFile(init.io, cli.out_file_path, .{}) catch |err| {
+        try stderr.print("failed to open out file: {s}\n", .{@errorName(err)});
+        return error.UserError;
+    };
+    defer out_file.close(init.io);
+
+    // Prepare buffered readers/writers
+    const read_buffer = try gpa.alloc(u8, BUFFER_SIZE);
+    defer gpa.free(read_buffer);
+    var in_file_reader = in_file.reader(init.io, read_buffer);
+    const reader = &in_file_reader.interface;
+    const write_buffer = try gpa.alloc(u8, BUFFER_SIZE);
+    defer gpa.free(write_buffer);
+    var out_file_writer = out_file.writer(init.io, write_buffer);
+    const writer = &out_file_writer.interface;
+
+    const driver: pgen.driver.Driver = .init(gpa, reader, stderr, writer, .{
+        .cst_owns_token = cli.cst_owns_token,
+        .token_extra = &.{cli.token_extra},
+        .dump_cfg = cli.dump_cfg,
+    });
+    driver.go() catch |err| return switch (err) {
+        error.GrammarError => error.UserError, // Already logged
+        else => |e| e,
+    };
+}
+
 pub fn main(init: std.process.Init) u8 {
     // Setup allocator (see https://ziglang.org/download/0.14.0/release-notes.html#SmpAllocator)
     const gpa, const is_debug = gpa: {
@@ -195,84 +203,22 @@ pub fn main(init: std.process.Init) u8 {
         _ = debug_allocator.deinit();
     };
 
-    var logger = Logger.init(init, gpa) catch {
-        std.debug.print("no memory to create logger\n", .{});
+    const stderr_file = std.Io.File.stderr();
+    const stderr_buffer = gpa.alloc(u8, BUFFER_SIZE) catch {
+        stderr_file.writeStreamingAll(init.io, "out of memory!\n") catch {};
         return 1;
     };
-    defer logger.deinit();
+    defer gpa.free(stderr_buffer);
+    var stderr_writer = stderr_file.writer(init.io, stderr_buffer);
+    const stderr = &stderr_writer.interface;
+    defer stderr.flush() catch {};
 
-    var cli = blk: {
-        // Prepare a diagnostic aggregator for CLI
-        var aggregator: pgen.diagnostic.Aggregator = .withLogging(gpa);
-        defer aggregator.deinit();
-        var cli_parser = CliParser.init(init, gpa, &aggregator) catch {
-            logger.writeLine("OOM (CLI parser init)");
-            return 1;
-        };
-        defer cli_parser.deinit();
-        break :blk cli_parser.go() catch |err| switch (err) {
-            error.CliParseError => {
-                logger.writeLine("CLI parsing failed; pass -h to see usage");
-                aggregator.printDiagnostics(logger.writer()) catch |err2| logger.check(err2);
-                return 1;
-            },
-            error.OutOfMemory => {
-                logger.writeLine("OOM (CLI parse)");
-                return 1;
-            },
-        };
-    };
-    defer cli.deinit();
-
-    // Read the in file (grammar description)
-    const in_file = std.Io.Dir.cwd().openFile(init.io, cli.in_file_path, .{ .allow_directory = false }) catch |err| {
-        logger.printLine("failed to open in file: {s}", .{@errorName(err)});
-        return 1;
-    };
-    defer in_file.close(init.io);
-
-    // Invent an out file path if not specified
-    if (cli.out_file_path.len == 0) {
-        const suffix = ".zig";
-        cli.out_file_path = cli.allocator.alloc(u8, cli.in_file_path.len + suffix.len) catch {
-            logger.printLine("OOM (auto out file path)", .{});
-            return 1;
-        };
-        @memcpy(cli.out_file_path[0..cli.in_file_path.len], cli.in_file_path);
-        @memcpy(cli.out_file_path[cli.in_file_path.len..], suffix);
-    }
-
-    const out_file = std.Io.Dir.cwd().createFile(init.io, cli.out_file_path, .{}) catch |err| {
-        logger.printLine("failed to open out file: {s}", .{@errorName(err)});
-        return 1;
-    };
-    defer out_file.close(init.io);
-    const read_buffer = gpa.alloc(u8, BUFFER_SIZE) catch {
-        logger.writeLine("OOM (read buffer)");
-        return 1;
-    };
-    defer gpa.free(read_buffer);
-    var in_file_reader = in_file.reader(init.io, read_buffer);
-    const reader = &in_file_reader.interface;
-    const write_buffer = gpa.alloc(u8, BUFFER_SIZE) catch {
-        logger.writeLine("OOM (write buffer)");
-        return 1;
-    };
-    defer gpa.free(write_buffer);
-    var out_file_writer = out_file.writer(init.io, write_buffer);
-    const writer = &out_file_writer.interface;
-
-    const driver: pgen.driver.Driver = .init(gpa, reader, logger.writer(), writer, .{
-        .cst_owns_token = cli.cst_owns_token,
-        .token_extra = &.{cli.token_extra},
-        .dump_cfg = cli.dump_cfg,
-    });
-    driver.go() catch |err| {
+    mainInner(init, gpa, stderr) catch |err| {
         switch (err) {
-            error.GrammarError => {}, // Already logged
-            error.OutOfMemory => logger.writeLine("out of memory!"),
-            error.ReadFailed => logger.writeLine("read input failed!"),
-            error.WriteFailed => logger.writeLine("write output/stderr failed!"),
+            error.OutOfMemory => stderr.writeAll("out of memory!\n") catch {},
+            error.ReadFailed => stderr.writeAll("read input failed!\n") catch {},
+            error.WriteFailed => stderr.writeAll("write output/stderr failed!\n") catch {},
+            error.UserError => {}, // Already logged
         }
         return 1;
     };
