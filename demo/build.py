@@ -63,6 +63,11 @@ def _make_static_builder(in_file: str, out_file: str | None = None):
     return copy_static
 
 PGEN_SOURCE = glob.glob('src/**/*.zig', recursive=True)
+# main.zig is CLI; web demo does not need it.
+try:
+    PGEN_SOURCE.remove('src/main.zig')
+except ValueError:
+    PGEN_SOURCE.remove('src\\main.zig')
 
 @builder("demo/build/bin/pgen-bridge.wasm", ["demo/bridge.zig", "build.zig", *PGEN_SOURCE])
 def build_bridge():
