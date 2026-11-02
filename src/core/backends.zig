@@ -46,6 +46,11 @@ fn stringToZigIdentifier(str: []const u8, out: *std.Io.Writer) std.Io.Writer.Err
 
 /// Struct responsible for emitting the final Zig source code.
 /// Includes skeleton code shared by all LR style parsers.
+///
+/// A user (backend) must implement `Parser.gotoTable` and `Parser.action`
+/// (the two table lookup methods), and the engine code (LR runtime) and data
+/// model (token, CST nodes, integer types representing states etc.) are
+/// supplied by this class.
 pub const ZigEmitter = struct {
     out: *std.Io.Writer,
     /// Extra fields/methods in `Token` struct. Can be used to add extra info
@@ -360,6 +365,11 @@ pub const ZigEmitter = struct {
             \\        }
             \\    }
             \\
+            \\    fn goto(self: *@This(), allocator: std.mem.Allocator, nt: NtSize) std.mem.Allocator.Error!void {
+            \\        const state = self.state_stack.getLast();
+            \\        try self.state_stack.append(allocator, gotoTable(state, nt));
+            \\    }
+            \\
         );
     }
 
@@ -389,6 +399,8 @@ pub const ZigEmitter = struct {
         return std.math.log2_int_ceil(usize, num_states);
     }
 
+    /// Writes information that can only be written *after* the table gen process
+    /// is done.
     pub fn writeEpilog(self: @This(), num_states: usize) std.Io.Writer.Error!void {
         try self.out.print(
             \\
@@ -410,10 +422,10 @@ pub const ZigEmitter = struct {
         try self.out.writeAll("};\n");
     }
 
-    pub fn implementGoto(self: @This()) std.Io.Writer.Error!void {
+    pub fn implementGotoTable(self: @This()) std.Io.Writer.Error!void {
         try self.out.writeAll(
             \\
-            \\    fn goto(self: *@This(), allocator: std.mem.Allocator, nt: NtSize) std.mem.Allocator.Error!void {
+            \\    fn gotoTable(state: StateSize, nt: NtSize) StateSize {
             \\
         );
     }
@@ -487,10 +499,9 @@ pub const ZigSwitchGotoHandler = struct {
         try row.append(allocator, .{ .nonterminal = nt, .new_state = state });
     }
     pub fn writeGotoMethod(self: @This(), emitter: ZigEmitter, symbol_spec: *const sym.SymbolSpec, num_states: u32) std.Io.Writer.Error!void {
-        try emitter.implementGoto();
+        try emitter.implementGotoTable();
         try emitter.out.writeAll(
-            \\        const state = self.state_stack.getLast();
-            \\        try self.state_stack.append(allocator, switch (state) {
+            \\        return switch (state) {
             \\
         );
         var skipped_prong = false;
@@ -512,10 +523,10 @@ pub const ZigSwitchGotoHandler = struct {
         }
         // Zig disallows extraneous else prong
         if (skipped_prong or self.goto_table.items.len < (@as(usize, 1) << @intCast(emitter.stateBits(num_states)))) {
-            try emitter.out.writeAll("else => unreachable");
+            try emitter.out.writeAll("else => unreachable\n");
         }
         try emitter.out.writeAll(
-            \\        });
+            \\        };
             \\
         );
         try emitter.endMethod();
@@ -834,7 +845,7 @@ pub fn ZigSwitchActionHandler(comptime ConflictResolver: type) type {
             }
             // Zig disallows extraneous else prong
             if (num_states < (@as(usize, 1) << @intCast(state_bits))) {
-                try emitter.out.writeAll("else => unreachable");
+                try emitter.out.writeAll("else => unreachable\n");
             }
             try emitter.out.writeAll(
                 \\        };
