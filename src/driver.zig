@@ -165,21 +165,17 @@ pub const Driver = struct {
                 ) catch |err| return switch (err) {
                     error.LrConflict => blk: {
                         try self.stderr.writeAll("table gen conflict: grammar is ambiguous or not compatible with the selected algorithm\n");
-                        if (algo == .slr) {
-                            const cr = backend.conflict_report.?;
-                            try explain.conflict(
-                                self.allocator,
-                                pgen_core.lr0.Item,
-                                self.stderr,
-                                cfg_managed.symbol_spec,
-                                cfg_managed.productions,
-                                sym_diagnostic,
-                                cr,
-                            );
-                        } else {
-                            // TODO
-                            try self.stderr.writeAll("LR(0) currently does not have conflict report; sorry");
-                        }
+                        // Both LR(0) and SLR backends have `conflict_report`.
+                        const cr = backend.conflict_report.?;
+                        try explain.conflict(
+                            self.allocator,
+                            pgen_core.lr0.Item,
+                            self.stderr,
+                            cfg_managed.symbol_spec,
+                            cfg_managed.productions,
+                            sym_diagnostic,
+                            cr,
+                        );
                         break :blk error.GrammarError;
                     },
                     else => |e| e,

@@ -491,7 +491,6 @@ pub const ZigSwitchGotoHandler = struct {
 
 /// Naive LR(0) backend that emits Zig source with
 /// **no conflict resolution** using switch statements for all mappings.
-/// TODO: report conflicts with at least some message
 pub const Lr0ZigSwitchBackend = struct {
     emitter: ZigEmitter,
     // Internal fields:
@@ -503,6 +502,10 @@ pub const Lr0ZigSwitchBackend = struct {
     /// ACTION[state][terminal]
     action_table: std.ArrayList(Lr0ActionRow) = .empty,
     goto_handler: ZigSwitchGotoHandler = .{},
+    /// If there is a conflict, it will be logged to here.
+    conflict_report: ?ReportedConflict(lr0.Item) = null,
+    /// How many times `beginState` has been called
+    state_counter: u32 = 0,
 
     pub fn free(self: *@This()) void {
         if (self.states == null) {
@@ -514,6 +517,9 @@ pub const Lr0ZigSwitchBackend = struct {
         }
         self.action_table.deinit(self.allocator);
         self.goto_handler.free(self.allocator);
+        if (self.conflict_report) |cr| {
+            cr.free(self.allocator);
+        }
     }
 
     pub const Error = ConflictError || std.Io.Writer.Error || std.mem.Allocator.Error;
@@ -525,6 +531,7 @@ pub const Lr0ZigSwitchBackend = struct {
         self.productions = productions;
     }
     pub fn beginState(self: *@This()) Error!void {
+        self.state_counter += 1;
         try self.action_table.append(self.allocator, .reject);
         try self.goto_handler.newState(self.allocator);
     }
@@ -538,10 +545,23 @@ pub const Lr0ZigSwitchBackend = struct {
             .reject => {
                 row.* = .{ .reduce = production };
             },
-            .shift => {
+            .shift => |shift_table| {
+                std.debug.assert(shift_table.items.len > 0);
+                // Select one example shift to report
+                const ex = shift_table.items[0];
+                try self.reportConflict(
+                    .{ .shift = ex.new_state },
+                    .{ .reduce = production },
+                    ex.terminal,
+                );
                 return ConflictError.LrConflict;
             },
-            .reduce => {
+            .reduce => |other_prod| {
+                try self.reportConflict(
+                    .{ .reduce = other_prod },
+                    .{ .reduce = production },
+                    null,
+                );
                 return ConflictError.LrConflict;
             },
         }
@@ -556,7 +576,12 @@ pub const Lr0ZigSwitchBackend = struct {
                 row.* = .{ .shift = .empty };
             },
             .shift => {},
-            .reduce => {
+            .reduce => |reduce_by| {
+                try self.reportConflict(
+                    .{ .shift = state },
+                    .{ .reduce = reduce_by },
+                    terminal,
+                );
                 return ConflictError.LrConflict;
             },
         }
@@ -617,6 +642,19 @@ pub const Lr0ZigSwitchBackend = struct {
         try self.emitter.endMethod();
         try self.goto_handler.writeGotoMethod(self.emitter, self.symbol_spec, @intCast(num_states));
         try self.emitter.writeEpilog(num_states);
+    }
+
+    /// Report a conflict at current state. We don't have conflict resolution
+    /// support since we assume if a state can reduce it must reduce for all
+    /// lookahead tokens.
+    fn reportConflict(self: *@This(), action1: Action, action2: Action, lookahead: ?u32) std.mem.Allocator.Error!void {
+        const copied_core_set = try self.allocator.dupe(lr0.Item, self.states.?.items[self.state_counter - 1]);
+        self.conflict_report = .{
+            .action1 = action1,
+            .action2 = action2,
+            .lookahead = lookahead,
+            .core_set = copied_core_set,
+        };
     }
 };
 
@@ -795,8 +833,10 @@ pub fn ZigSwitchActionHandler(comptime ConflictResolver: type) type {
 /// accepting, as usual.
 pub fn ReportedConflict(comptime Item: type) type {
     return struct {
-        core_set: []Item, // Owned slice
-        lookahead: u32,
+        /// Owned slice
+        core_set: []Item,
+        /// Lookahead may be null for a reduce-reduce conflict under LR(0)
+        lookahead: ?u32,
         action1: Action,
         action2: Action,
 

@@ -255,9 +255,11 @@ pub fn conflict(
         }
         try writer.writeByte('\n');
     }
-    try writer.writeAll("and lookahead: ");
-    try cfg_dumper.writeToken(writer, report.lookahead);
-    try writer.writeByte('\n');
+    if (report.lookahead) |lookahead| {
+        try writer.writeAll("and lookahead: ");
+        try cfg_dumper.writeToken(writer, lookahead);
+        try writer.writeByte('\n');
+    }
     try writer.writeAll("Action 1: ");
     try nt_explain.writeAndAddAction(writer, report.action1);
     try writer.writeByte('\n');
