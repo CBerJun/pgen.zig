@@ -9,6 +9,7 @@ const BUFFER_SIZE = 4096;
 const ParsedArgs = struct {
     allocator: std.mem.Allocator,
     // These specify the default values.
+    algorithm: pgen.driver.Algorithm = .slr,
     cst_owns_token: bool = false,
     token_extra: []u8 = &.{},
     in_file_path: []u8 = &.{},
@@ -37,6 +38,7 @@ const CliParser = struct {
         \\Option list:
         \\    --                End of option list signal
         \\    -o/-out FILE      Output file
+        \\    -a ALGORITHM      Table gen algorithm to use (slr (default), lr0)
         \\    -cst-owns-token   If set, `CSTNode`s will own the passed in tokens. There is implication on mem management. See generated source's doc.
         \\    -token-extra CODE Extra source code to add into the `Token` struct
         \\    -h                Print this message and exit
@@ -92,6 +94,16 @@ const CliParser = struct {
             const rest = arg[1..];
             if (std.mem.eql(u8, rest, "-")) {
                 end_of_options = true;
+            } else if (std.mem.eql(u8, rest, "a")) {
+                if (self.iterator.next()) |payload| {
+                    ans.algorithm = std.meta.stringToEnum(pgen.driver.Algorithm, payload) orelse {
+                        self.aggregator.add(.fatal, "invalid algorithm {s}", .{payload});
+                        return error.CliParseError;
+                    };
+                } else {
+                    self.aggregator.add(.fatal, "expected parameter following -a", .{});
+                    return error.CliParseError;
+                }
             } else if (std.mem.eql(u8, rest, "cst-owns-token")) {
                 ans.cst_owns_token = true;
             } else if (std.mem.eql(u8, rest, "token-extra")) {
@@ -188,6 +200,7 @@ fn mainInner(init: std.process.Init, gpa: std.mem.Allocator, stderr: *std.Io.Wri
     const writer = &out_file_writer.interface;
 
     const driver: pgen.driver.Driver = .init(gpa, reader, stderr, writer, .{
+        .algorithm = cli.algorithm,
         .cst_owns_token = cli.cst_owns_token,
         .token_extra = &.{cli.token_extra},
         .dump_cfg = cli.dump_cfg,
