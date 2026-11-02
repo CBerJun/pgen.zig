@@ -85,6 +85,13 @@ factor: NUMBER | "(" expr ")";
             <label for="cst-owns-token">Generated parse tree owns token:</label>
             <input id="cst-owns-token" type="checkbox" name="cst-owns-token">
         </p>
+        <p>
+            <label for="algo">Algorithm (current strongest: SLR):</label>
+            <select id="algo" name="algo">
+                <option value="slr" selected>SLR</option>
+                <option value="lr0">LR(0)</option>
+            </select>
+        </p>
         <p>Diagnostics:</p>
         <pre id="output-stderr">Errors and warnings are displayed here.</pre>
         <p>Output Zig program:</p>

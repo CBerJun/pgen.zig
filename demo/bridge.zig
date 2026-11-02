@@ -6,12 +6,13 @@ const oom_message = "out of memory for stderr\n";
 
 /// Returned buffer (`out_error`, `out_result`) must be deinited with
 /// `releaseMessage`.
-export fn pgenParse(
+export fn pgenRun(
     src_ptr: [*]const u8,
     src_len: usize,
     out_error: *[]const u8,
     out_result: *[]const u8,
     // Config options
+    algorithm: u8,
     cst_owns_token: bool,
 ) void {
     const src: []const u8 = src_ptr[0..src_len];
@@ -32,6 +33,12 @@ export fn pgenParse(
     const writer = &result_alloc_writer.writer;
 
     var driver: pgen.driver.Driver = .init(gpa, reader, stderr, writer, .{
+        .algorithm = switch (algorithm) {
+            // Keep this table in sync with pgen-demo.js!
+            0 => .slr,
+            1 => .lr0,
+            else => unreachable,
+        },
         .cst_owns_token = cst_owns_token,
     });
     driver.go() catch |err| {

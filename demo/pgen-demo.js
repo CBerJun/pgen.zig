@@ -6,7 +6,13 @@ WebAssembly.instantiateStreaming(fetch("pgen-bridge.wasm")).then(
     },
 );
 
-function backendParse(input, cstOwnsToken) {
+// Keep this table in sync with bridge.zig!
+const algorithmMap = {
+    slr: 0,
+    lr0: 1,
+};
+
+function runPgen(input, cstOwnsToken, algorithm) {
     err = (message) => ({
         stderrText: message,
         stdoutText: "",
@@ -18,7 +24,7 @@ function backendParse(input, cstOwnsToken) {
     if (input == "")
         return err("Type something...");
     const {
-        memory, pgenParse, newMessagePtr,
+        memory, pgenRun, newMessagePtr,
         releaseMessage, newBuffer, freeBuffer,
         messagePtr, messageLen, invalidPtr,
     } = wasmExports;
@@ -34,7 +40,7 @@ function backendParse(input, cstOwnsToken) {
         return err("Out of memory");
     }
     new TextEncoder().encodeInto(input, new Uint8Array(memory.buffer, inBuffer, inLen));
-    pgenParse(inBuffer, inLen, stderr, stdout, cstOwnsToken);
+    pgenRun(inBuffer, inLen, stderr, stdout, algorithmMap[algorithm], cstOwnsToken);
     freeBuffer(inBuffer, inLen);
 
     obtainMessage = (msg) => new TextDecoder().decode(new Uint8Array(
@@ -51,11 +57,12 @@ function backendParse(input, cstOwnsToken) {
 document.addEventListener('DOMContentLoaded', () => {
     const inputSource = document.getElementById("input-source");
     const cstOwnsToken = document.getElementById("cst-owns-token");
+    const algo = document.getElementById("algo");
     const stderrBox = document.getElementById("output-stderr");
     const stdoutBox = document.getElementById("output-stdout");
     let debounceTimer = null;
     function goParse() {
-        const {stderrText, stdoutText} = backendParse(inputSource.value, cstOwnsToken.checked);
+        const {stderrText, stdoutText} = runPgen(inputSource.value, cstOwnsToken.checked, algo.value);
         stderrBox.textContent = (stderrText.length > 0) ? stderrText : "(no error)";
         stdoutBox.textContent = (stdoutText.length > 0) ? stdoutText : "(no output)";
     }
@@ -66,4 +73,5 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     inputSource.addEventListener('input', onInputChanged);
     cstOwnsToken.addEventListener('change', onInputChanged);
+    algo.addEventListener('change', onInputChanged);
 });
