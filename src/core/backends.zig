@@ -302,7 +302,8 @@ pub const ZigEmitter = struct {
             \\        try self.node_count_stack.append(allocator, 1);
             \\    }
             \\
-            \\    fn reduce(self: *@This(), allocator: std.mem.Allocator, rhs_len: u32, lhs: NtSize, form_node: bool) std.mem.Allocator.Error!void {
+            \\    fn reduce(self: *@This(), allocator: std.mem.Allocator, rhs_len: u32, lhs: NtSize) std.mem.Allocator.Error!void {
+            \\        const form_node = isNodeForming(lhs);
             \\        const hi = self.node_count_stack.items.len;
             \\        const lo = hi - rhs_len;
             \\        var x: NodeCountSize = 0;
@@ -330,7 +331,6 @@ pub const ZigEmitter = struct {
             \\        reduce: struct {
             \\            rhs_len: u32,
             \\            lhs: NtSize,
-            \\            node_forming: bool,
             \\        },
             \\        accept,
             \\        reject,
@@ -362,7 +362,7 @@ pub const ZigEmitter = struct {
             \\            const state = self.state_stack.getLast();
             \\            switch (action(state, T)) {
             \\                .shift => |new_state| return self.shift(allocator, token, new_state),
-            \\                .reduce => |r| try self.reduce(allocator, r.rhs_len, r.lhs, r.node_forming),
+            \\                .reduce => |r| try self.reduce(allocator, r.rhs_len, r.lhs),
             \\                .reject => return error.PgenParseError,
             \\                .accept => return,
             \\            }
@@ -375,6 +375,13 @@ pub const ZigEmitter = struct {
             \\    }
             \\
         );
+        try self.out.print(
+            \\
+            \\    fn isNodeForming(nt: NtSize) bool {{
+            \\        return nt < {};
+            \\    }}
+            \\
+        , .{symbol_spec.nonterminals.node_forming_count});
     }
 
     pub fn tagBackingIntBits(_: @This(), symbol_spec: *const sym.SymbolSpec) u16 {
@@ -385,13 +392,10 @@ pub const ZigEmitter = struct {
         return std.math.log2_int_ceil(u32, symbol_spec.nonterminals.count);
     }
 
-    pub fn writeReduceAction(self: @This(), symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, prod_id: u32) std.Io.Writer.Error!void {
-        const rhs_len = productions.rhs[prod_id].len;
-        const lhs = productions.lhs[prod_id];
-        try self.out.print(".{{.reduce = .{{.rhs_len = {}, .lhs = {}, .node_forming = {s}}}}}", .{
-            rhs_len,
-            lhs,
-            if (symbol_spec.nonterminals.isNodeForming(lhs)) "true" else "false",
+    pub fn writeReduceAction(self: @This(), productions: *const cfg.CfgProductions, prod_id: u32) std.Io.Writer.Error!void {
+        try self.out.print(".{{.reduce = .{{.rhs_len = {}, .lhs = {}}}}}", .{
+            productions.rhs[prod_id].len,
+            productions.lhs[prod_id],
         });
     }
 
@@ -649,7 +653,7 @@ pub const Lr0SwitchBackend = struct {
                     try self.emitter.out.writeAll(".reject");
                 },
                 .reduce => |prod_id| {
-                    try self.emitter.writeReduceAction(self.symbol_spec, self.productions, prod_id);
+                    try self.emitter.writeReduceAction(self.productions, prod_id);
                 },
                 .shift => |shifts| {
                     try self.emitter.out.writeAll("switch (lookahead) {");
@@ -828,7 +832,7 @@ pub fn SwitchActionHandler(comptime ConflictResolver: type) type {
                     try emitter.out.print("{} => ", .{terminal});
                     switch (entry.value_ptr.*) {
                         .reduce => |prod_id| {
-                            try emitter.writeReduceAction(self.symbol_spec, self.productions, prod_id);
+                            try emitter.writeReduceAction(self.productions, prod_id);
                         },
                         .shift => |new_state| {
                             if (terminal == self.symbol_spec.terminals.eoi) { // Accept
