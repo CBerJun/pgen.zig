@@ -1,6 +1,10 @@
 //! Backends generate runnable parsers from parse table.
 //! The parse table is never explicitly provided to the backend however.
 //! See `lr0` for example.
+//!
+//! The two main tables used in LR parser generation are ACTION and GOTO,
+//! so certain backends accept generic "action handler" and "goto handler"
+//! that handles the corresponding table.
 
 const std = @import("std");
 const lr0 = @import("./lr0.zig");
@@ -481,7 +485,7 @@ pub const GotoTableEntry = struct {
 };
 
 /// Handle GOTO using switch statements nested in a switch statement.
-pub const ZigSwitchGotoHandler = struct {
+pub const SwitchGotoHandler = struct {
     /// GOTO[state][nonterminal]
     goto_table: std.ArrayList(std.ArrayList(GotoTableEntry)) = .empty,
 
@@ -535,7 +539,7 @@ pub const ZigSwitchGotoHandler = struct {
 
 /// Naive LR(0) backend that emits Zig source with
 /// **no conflict resolution** using switch statements for all mappings.
-pub const Lr0ZigSwitchBackend = struct {
+pub const Lr0SwitchBackend = struct {
     emitter: ZigEmitter,
     // Internal fields:
     /// A `states` of `null` means `beginTableGen` has not been called.
@@ -545,7 +549,7 @@ pub const Lr0ZigSwitchBackend = struct {
     productions: *const cfg.CfgProductions = undefined,
     /// ACTION[state][terminal]
     action_table: std.ArrayList(Lr0ActionRow) = .empty,
-    goto_handler: ZigSwitchGotoHandler = .{},
+    goto_handler: SwitchGotoHandler = .{},
     /// If there is a conflict, it will be logged to here.
     conflict_report: ?ReportedConflict(lr0.Item) = null,
     /// How many times `beginState` has been called
@@ -718,7 +722,7 @@ pub const ActionRow = std.HashMapUnmanaged(u32, Action, std.hash_map.AutoContext
 /// Emit Zig code to handle any LR-style ACTION table
 /// `std.ArrayList(SlrActionRow)`. A `ConflictResolver` of `void` means no
 /// conflict resolution.
-pub fn ZigSwitchActionHandler(comptime ConflictResolver: type) type {
+pub fn SwitchActionHandler(comptime ConflictResolver: type) type {
     return struct {
         symbol_spec: *const sym.SymbolSpec,
         productions: *const cfg.CfgProductions,

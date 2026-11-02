@@ -135,13 +135,13 @@ pub const Driver = struct {
         switch (self.config.algorithm) {
             // Trick to force `algo` to be comptime available.
             inline else => |algo| {
-                var backend = if (algo == .lr0) pgen_core.backends.Lr0ZigSwitchBackend{
+                var backend = if (algo == .lr0) pgen_core.backends.Lr0SwitchBackend{
                     .emitter = zig_emitter,
                 } else blk: {
                     const follow_set = try ds.getFollowSet();
                     break :blk pgen_core.backends.SlrBackend(
-                        pgen_core.backends.ZigSwitchActionHandler(void),
-                        pgen_core.backends.ZigSwitchGotoHandler,
+                        pgen_core.backends.SwitchActionHandler(void),
+                        pgen_core.backends.SwitchGotoHandler,
                     ){
                         .emitter = zig_emitter,
                         .follow_sets = &follow_set,

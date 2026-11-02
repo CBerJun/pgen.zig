@@ -31,8 +31,8 @@ pub fn main(init: std.process.Init) !void {
     const writer = &out_writer.interface;
 
     var backend: pgen_core.backends.SlrBackend(
-        pgen_core.backends.ZigSwitchActionHandler(void),
-        pgen_core.backends.ZigSwitchGotoHandler,
+        pgen_core.backends.SwitchActionHandler(void),
+        pgen_core.backends.SwitchGotoHandler,
     ) = .{
         .emitter = .{
             .out = writer,
