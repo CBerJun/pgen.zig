@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
                 "        .WORD => allocator.free(self.payload.word),",
                 "        .STRING => {",
                 "            allocator.free(self.payload.str.content);",
-                "            if (self.payload.str.suffix.len > 0) allocator.free(self.payload.str.suffix);",
+                "            allocator.free(self.payload.str.suffix);",
                 "        },",
                 "        else => {},",
                 "    }",
