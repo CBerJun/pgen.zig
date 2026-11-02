@@ -293,7 +293,7 @@ pub const ZigEmitter = struct {
             \\        try self.node_count_stack.append(allocator, 1);
             \\    }
             \\
-            \\    fn reduce(self: *@This(), allocator: std.mem.Allocator, rhs_len: u32, lhs: NtSize, comptime form_node: bool) std.mem.Allocator.Error!void {
+            \\    fn reduce(self: *@This(), allocator: std.mem.Allocator, rhs_len: u32, lhs: NtSize, form_node: bool) std.mem.Allocator.Error!void {
             \\        const hi = self.node_count_stack.items.len;
             \\        const lo = hi - rhs_len;
             \\        var x: NodeCountSize = 0;
@@ -315,12 +315,52 @@ pub const ZigEmitter = struct {
             \\        try self.state_stack.resize(allocator, self.state_stack.items.len - rhs_len);
             \\        try self.goto(allocator, lhs);
             \\    }
+            \\
+            \\    const Action = union(enum) {
+            \\        shift: StateSize,
+            \\        reduce: struct {
+            \\            rhs_len: u32,
+            \\            lhs: NtSize,
+            \\            node_forming: bool,
+            \\        },
+            \\        accept,
+            \\        reject,
+            \\    };
+            \\
         );
         try self.out.print(
             \\
             \\    const NtSize = u{};
             \\
         , .{self.ntBits(symbol_spec)});
+        try self.out.writeAll(
+            \\
+            \\    /// Feed a token to the parser.
+            \\
+        );
+        if (self.cst_owns_token) {
+            try self.out.writeAll(
+                \\    /// `token`'s ownership is transferred to the temporary CST nodes owned
+                \\    /// by this parser, unless an error occurs, *or* it's the terminating
+                \\    /// token (of tag `.@"$"`) (which does not end up in the CST at all).
+                \\
+            );
+        }
+        try self.out.writeAll(
+            \\    pub fn feed(self: *@This(), allocator: std.mem.Allocator, token: Token) (Error || std.mem.Allocator.Error)!void {
+            \\        const T = @intFromEnum(token.tag);
+            \\        while (true) {
+            \\            const state = self.state_stack.getLast();
+            \\            switch (action(state, T)) {
+            \\                .shift => |new_state| return self.shift(allocator, token, new_state),
+            \\                .reduce => |r| try self.reduce(allocator, r.rhs_len, r.lhs, r.node_forming),
+            \\                .reject => return error.PgenParseError,
+            \\                .accept => return,
+            \\            }
+            \\        }
+            \\    }
+            \\
+        );
     }
 
     pub fn tagBackingIntBits(_: @This(), symbol_spec: *const sym.SymbolSpec) u16 {
@@ -331,14 +371,18 @@ pub const ZigEmitter = struct {
         return std.math.log2_int_ceil(u32, symbol_spec.nonterminals.count);
     }
 
-    pub fn writeReduceCall(self: @This(), symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, prod_id: u32) std.Io.Writer.Error!void {
+    pub fn writeReduceAction(self: @This(), symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, prod_id: u32) std.Io.Writer.Error!void {
         const rhs_len = productions.rhs[prod_id].len;
         const lhs = productions.lhs[prod_id];
-        try self.out.print("self.reduce(allocator, {}, {}, {s})", .{
+        try self.out.print(".{{.reduce = .{{.rhs_len = {}, .lhs = {}, .node_forming = {s}}}}}", .{
             rhs_len,
             lhs,
             if (symbol_spec.nonterminals.isNodeForming(lhs)) "true" else "false",
         });
+    }
+
+    pub fn writeShiftAction(self: @This(), new_state: u32) std.Io.Writer.Error!void {
+        try self.out.print(".{{.shift = {}}}", .{new_state});
     }
 
     pub fn stateBits(_: @This(), num_states: usize) u16 {
@@ -366,30 +410,19 @@ pub const ZigEmitter = struct {
         try self.out.writeAll("};\n");
     }
 
-    pub fn implementFeed(self: @This()) std.Io.Writer.Error!void {
-        try self.out.writeByte('\n');
-        try self.out.writeAll(
-            \\    /// Feed a token to the parser.
-            \\
-        );
-        if (self.cst_owns_token) {
-            try self.out.writeAll(
-                \\    /// `token`'s ownership is transferred to the temporary CST nodes owned
-                \\    /// by this parser, unless an error occurs, *or* it's the terminating
-                \\    /// token (of tag `.@"$"`) (which does not end up in the CST at all).
-                \\
-            );
-        }
-        try self.out.writeAll(
-            \\    pub fn feed(self: *@This(), allocator: std.mem.Allocator, token: Token) (Error || std.mem.Allocator.Error)!void {
-            \\
-        );
-    }
-
     pub fn implementGoto(self: @This()) std.Io.Writer.Error!void {
         try self.out.writeAll(
             \\
             \\    fn goto(self: *@This(), allocator: std.mem.Allocator, nt: NtSize) std.mem.Allocator.Error!void {
+            \\
+        );
+    }
+
+    pub fn implementAction(self: @This()) std.Io.Writer.Error!void {
+        try self.out.writeAll(
+            \\
+            \\    fn action(state: StateSize, lookahead: @typeInfo(Token.Tag).@"enum".tag_type) Action {
+            \\        return switch (state) {
             \\
         );
     }
@@ -589,54 +622,47 @@ pub const Lr0ZigSwitchBackend = struct {
     }
     pub fn endTableGen(self: *@This()) Error!void {
         try self.emitter.writeProlog(self.symbol_spec);
-        try self.emitter.implementFeed();
-        try self.emitter.out.writeAll(
-            \\        const T = @intFromEnum(token.tag);
-            \\        while (true) {
-            \\            switch (self.state_stack.getLast()) {
-            \\
-        );
+        try self.emitter.implementAction();
         const num_states = self.states.?.items.len;
         const state_bits = self.emitter.stateBits(num_states);
         const tag_bits = self.emitter.tagBackingIntBits(self.symbol_spec);
         for (0..num_states) |state| {
             const action_row = self.action_table.items[state];
-            try self.emitter.out.print("{} => {{", .{state});
+            try self.emitter.out.print("{} => ", .{state});
             switch (action_row) {
                 .reject => {
-                    try self.emitter.out.writeAll("return Error.PgenParseError;");
+                    try self.emitter.out.writeAll(".reject");
                 },
                 .reduce => |prod_id| {
-                    try self.emitter.out.writeAll("try ");
-                    try self.emitter.writeReduceCall(self.symbol_spec, self.productions, prod_id);
-                    try self.emitter.out.writeByte(';');
+                    try self.emitter.writeReduceAction(self.symbol_spec, self.productions, prod_id);
                 },
                 .shift => |shifts| {
-                    try self.emitter.out.writeAll("switch (T) {");
+                    try self.emitter.out.writeAll("switch (lookahead) {");
                     for (shifts.items) |entry| {
+                        try self.emitter.out.print("{} => ", .{entry.terminal});
                         if (entry.terminal == self.symbol_spec.terminals.eoi) { // Accept
                             @branchHint(.unlikely);
-                            try self.emitter.out.print("{} => {{}}, ", .{entry.terminal});
+                            try self.emitter.out.writeAll(".accept");
                         } else {
-                            try self.emitter.out.print("{} => try self.shift(allocator, token, {}), ", .{ entry.terminal, entry.new_state });
+                            try self.emitter.writeShiftAction(entry.new_state);
                         }
+                        try self.emitter.out.writeAll(", ");
                     }
                     // Zig disallows extraneous else prong
                     if (shifts.items.len < (@as(usize, 1) << @intCast(tag_bits))) {
-                        try self.emitter.out.writeAll("else => return Error.PgenParseError");
+                        try self.emitter.out.writeAll("else => .reject");
                     }
-                    try self.emitter.out.writeAll("} return;");
+                    try self.emitter.out.writeAll("}");
                 },
             }
-            try self.emitter.out.writeAll("},\n");
+            try self.emitter.out.writeAll(",\n");
         }
         // Zig disallows extraneous else prong
         if (num_states < (@as(usize, 1) << @intCast(state_bits))) {
-            try self.emitter.out.writeAll("else => unreachable");
+            try self.emitter.out.writeAll("else => unreachable\n");
         }
         try self.emitter.out.writeAll(
-            \\            }
-            \\        }
+            \\        };
             \\
         );
         try self.emitter.endMethod();
@@ -775,41 +801,34 @@ pub fn ZigSwitchActionHandler(comptime ConflictResolver: type) type {
             return self.shift(allocator, self.symbol_spec.terminals.eoi, 0);
         }
         pub fn writeFeedMethod(self: @This(), emitter: ZigEmitter) std.Io.Writer.Error!void {
-            try emitter.implementFeed();
-            try emitter.out.writeAll(
-                \\        const T = @intFromEnum(token.tag);
-                \\        while (true) {
-                \\            switch (self.state_stack.getLast()) {
-                \\
-            );
             const num_states = self.action_table.items.len;
             const state_bits = emitter.stateBits(num_states);
             const tag_bits = emitter.tagBackingIntBits(self.symbol_spec);
+            try emitter.implementAction();
             for (self.action_table.items, 0..) |action_row, state| {
-                try emitter.out.print("{} => switch (T) {{", .{state});
+                try emitter.out.print("{} => switch (lookahead) {{", .{state});
                 var it = action_row.iterator();
                 while (it.next()) |entry| {
                     const terminal = entry.key_ptr.*;
                     try emitter.out.print("{} => ", .{terminal});
                     switch (entry.value_ptr.*) {
                         .reduce => |prod_id| {
-                            try emitter.out.writeAll("try ");
-                            try emitter.writeReduceCall(self.symbol_spec, self.productions, prod_id);
-                            try emitter.out.writeAll(", ");
+                            try emitter.writeReduceAction(self.symbol_spec, self.productions, prod_id);
                         },
                         .shift => |new_state| {
                             if (terminal == self.symbol_spec.terminals.eoi) { // Accept
                                 @branchHint(.unlikely);
-                                try emitter.out.writeAll("return, ");
+                                try emitter.out.writeAll(".accept");
                             } else {
-                                try emitter.out.print("return self.shift(allocator, token, {}), ", .{new_state});
+                                try emitter.writeShiftAction(new_state);
                             }
                         },
                     }
+                    try emitter.out.writeAll(", ");
                 }
                 // Zig disallows extraneous else prong
                 if (action_row.size < (@as(u32, 1) << @intCast(tag_bits))) {
-                    try emitter.out.writeAll("else => return Error.PgenParseError");
+                    try emitter.out.writeAll("else => .reject");
                 }
                 try emitter.out.writeAll("},\n");
             }
@@ -818,8 +837,7 @@ pub fn ZigSwitchActionHandler(comptime ConflictResolver: type) type {
                 try emitter.out.writeAll("else => unreachable");
             }
             try emitter.out.writeAll(
-                \\            }
-                \\        }
+                \\        };
                 \\
             );
             try emitter.endMethod();
