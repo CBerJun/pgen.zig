@@ -145,11 +145,7 @@ pub const Driver = struct {
                     ){
                         .emitter = zig_emitter,
                         .follow_sets = &follow_set,
-                        .action_handler = .{
-                            .symbol_spec = &cfg_managed.symbol_spec,
-                            .productions = &cfg_managed.productions,
-                            .conflict_resolver = {},
-                        },
+                        .conflict_resolver = {},
                         .goto_handler = .{},
                     };
                 };

@@ -67,11 +67,7 @@ pub fn main(init: std.process.Init) !void {
             .node_count_bits = 32,
         },
         .follow_sets = &follow_set,
-        .action_handler = .{
-            .symbol_spec = &meta_cfg.meta_symbol_spec,
-            .productions = &meta_cfg.meta_productions,
-            .conflict_resolver = {},
-        },
+        .conflict_resolver = {},
         .goto_handler = .{},
     };
     defer backend.free();

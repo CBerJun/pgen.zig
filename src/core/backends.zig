@@ -442,7 +442,6 @@ pub const ZigEmitter = struct {
         try self.out.writeAll(
             \\
             \\    fn action(state: StateSize, lookahead: @typeInfo(Token.Tag).@"enum".tag_type) Action {
-            \\        return switch (state) {
             \\
         );
     }
@@ -642,6 +641,10 @@ pub const Lr0SwitchBackend = struct {
     pub fn endTableGen(self: *@This()) Error!void {
         try self.emitter.writeProlog(self.symbol_spec);
         try self.emitter.implementAction();
+        try self.emitter.out.writeAll(
+            \\        return switch (state) {
+            \\
+        );
         const num_states = self.states.?.items.len;
         const state_bits = self.emitter.stateBits(num_states);
         const tag_bits = self.emitter.tagBackingIntBits(self.symbol_spec);
@@ -712,10 +715,258 @@ pub const Action = union(enum) {
     reduce: u32,
 };
 
-/// A row in a LR-style ACTION table. A hash map from terminal IDs to actions.
-/// A terminal not in the hash map indicates an "error" action upon seeing that
-/// terminal.
-pub const ActionRow = std.HashMapUnmanaged(u32, Action, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage);
+/// Specialized `SwitchActionHandler(void)`.
+const SwitchActionHandlerNoConflict = struct {
+    symbol_spec: *const sym.SymbolSpec,
+    productions: *const cfg.CfgProductions,
+    conflict_resolver: void,
+    /// ACTION[state][terminal]
+    action_table: std.ArrayList(ActionRow),
+    /// Current ACTION row we're building, null if none exists
+    current_row: BuildingActionRow,
+    /// If we've started the first ACTION row.
+    started_first_row: bool,
+    // Following are for conflict reporting; they are undefined if no
+    // conflict occurred.
+    conflicting_action1: Action,
+    conflicting_action2: Action,
+    conflicting_lookahead: u32,
+
+    /// Reexport the conflict resolver type.
+    pub const ConflictResolver = void;
+
+    /// A (validated) row in an ACTION table. A hashmap is unnecessary here since
+    /// we can use a bitset to more efficiently identify conflicts during table gen,
+    /// and discard the bitset once we're done.
+    const ActionRow = struct {
+        shifts: std.ArrayList(struct { terminal: u32, state: u32 }),
+        reduces: std.ArrayList(GroupedReduces),
+
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            self.shifts.deinit(allocator);
+            for (self.reduces.items) |*reduce_group| {
+                reduce_group.deinit(allocator);
+            }
+            self.reduces.deinit(allocator);
+        }
+
+        pub fn searchForReduce(self: @This(), lookahead: u32) ?u32 {
+            for (self.reduces.items) |reduce_group| {
+                if (std.mem.findScalar(u32, reduce_group.lookaheads, lookahead)) |_| {
+                    return reduce_group.production;
+                }
+            }
+            return null;
+        }
+
+        pub fn searchForShift(self: @This(), lookahead: u32) ?u32 {
+            for (self.shifts.items) |entry| {
+                if (entry.terminal == lookahead) {
+                    return entry.state;
+                }
+            }
+            return null;
+        }
+
+        pub fn searchForAction(self: @This(), lookahead: u32) ?Action {
+            if (self.searchForShift(lookahead)) |new_state| {
+                return .{ .shift = new_state };
+            }
+            if (self.searchForReduce(lookahead)) |production| {
+                return .{ .reduce = production };
+            }
+            return null;
+        }
+    };
+
+    /// A row in an ACTION table that is *being built*.
+    const BuildingActionRow = struct {
+        /// Length is number of terminals; records if each terminal has a
+        /// corresponding action. For conflict detection.
+        occupied: std.DynamicBitSetUnmanaged,
+        /// The actual action row.
+        row: ?ActionRow,
+
+        pub fn init(allocator: std.mem.Allocator, num_terminals: u32) std.mem.Allocator.Error!@This() {
+            const occupied = try std.DynamicBitSetUnmanaged.initEmpty(allocator, num_terminals);
+            errdefer occupied.deinit(allocator);
+            return .{
+                .occupied = occupied,
+                .row = null,
+            };
+        }
+
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            defer self.* = undefined;
+            self.occupied.deinit(allocator);
+            if (self.row) |row| {
+                var row_ = row;
+                row_.deinit(allocator);
+            }
+        }
+
+        /// Start a building row.
+        pub fn beginRow(self: *@This()) void {
+            self.occupied.unsetAll();
+            self.row = .{
+                .shifts = .empty,
+                .reduces = .empty,
+            };
+        }
+
+        /// End the current building row, returning the resulting row (ownership
+        /// is transferred).
+        pub fn endRow(self: *@This()) ActionRow {
+            defer self.row = null;
+            return self.row.?;
+        }
+    };
+
+    /// A group of reduce actions. This is a compact representation if the same
+    /// item has many lookahead tokens that it accepts. This also allows us to
+    /// generate more efficient code in the switch prongs.
+    pub const GroupedReduces = struct {
+        /// Production ID used to reduce.
+        production: u32,
+        /// The lookahead must be one of these.
+        lookaheads: []u32,
+
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            allocator.free(self.lookaheads);
+        }
+    };
+
+    pub fn init(allocator: std.mem.Allocator, symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, conflict_resolver: void) std.mem.Allocator.Error!@This() {
+        const building_row = try BuildingActionRow.init(allocator, symbol_spec.terminals.count);
+        errdefer building_row.deinit(allocator);
+        return .{
+            .symbol_spec = symbol_spec,
+            .productions = productions,
+            .conflict_resolver = conflict_resolver,
+            .action_table = .empty,
+            .current_row = building_row,
+            .started_first_row = false,
+            .conflicting_action1 = undefined,
+            .conflicting_action2 = undefined,
+            .conflicting_lookahead = undefined,
+        };
+    }
+
+    pub fn free(self: *@This(), allocator: std.mem.Allocator) void {
+        for (self.action_table.items) |*row| {
+            row.deinit(allocator);
+        }
+        self.action_table.deinit(allocator);
+        self.current_row.deinit(allocator);
+    }
+
+    pub const ActionError = std.mem.Allocator.Error || ConflictError;
+
+    fn potentialEndOfPreviousRow(self: *@This(), allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
+        if (self.started_first_row) {
+            @branchHint(.likely);
+            try self.action_table.append(allocator, self.current_row.endRow());
+        } else {
+            self.started_first_row = true;
+        }
+    }
+    pub fn newState(self: *@This(), allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
+        try self.potentialEndOfPreviousRow(allocator);
+        self.current_row.beginRow();
+    }
+    pub fn shift(self: *@This(), allocator: std.mem.Allocator, terminal: u32, state: u32) ActionError!void {
+        if (self.current_row.occupied.isSet(terminal)) {
+            self.conflicting_lookahead = terminal;
+            self.conflicting_action1 = .{ .shift = state };
+            // We have to find the reduce rule that is in conflict
+            self.conflicting_action2 = .{ .reduce = self.current_row.row.?.searchForReduce(terminal).? };
+            return ConflictError.LrConflict;
+        }
+        self.current_row.occupied.set(terminal);
+        try self.current_row.row.?.shifts.append(allocator, .{ .terminal = terminal, .state = state });
+    }
+    pub fn reduceMultiple(self: *@This(), allocator: std.mem.Allocator, terminals: std.DynamicBitSetUnmanaged, production: u32) ActionError!void {
+        { // Conflict detection
+            var row_copy = try self.current_row.occupied.clone(allocator);
+            defer row_copy.deinit(allocator);
+            row_copy.setIntersection(terminals);
+            // If conflict, find one example lookahead to report on
+            if (row_copy.findFirstSet()) |terminal| {
+                self.conflicting_lookahead = @intCast(terminal);
+                self.conflicting_action1 = .{ .reduce = production };
+                self.conflicting_action2 = self.current_row.row.?.searchForAction(@intCast(terminal)).?;
+                return ConflictError.LrConflict;
+            }
+        }
+        const n_lookaheads = terminals.count();
+        var lookaheads = try allocator.alloc(u32, n_lookaheads);
+        errdefer allocator.free(lookaheads);
+        var it = terminals.iterator(.{});
+        var i: usize = 0;
+        while (it.next()) |terminal| {
+            lookaheads[i] = @intCast(terminal);
+            i += 1;
+        }
+        self.current_row.occupied.setUnion(terminals);
+        try self.current_row.row.?.reduces.append(allocator, .{
+            .lookaheads = lookaheads,
+            .production = production,
+        });
+    }
+    pub fn acceptOnEoi(self: *@This(), allocator: std.mem.Allocator) ActionError!void {
+        // New `state` can be any
+        return self.shift(allocator, self.symbol_spec.terminals.eoi, 0);
+    }
+    pub fn writeActionMethod(self: *@This(), emitter: ZigEmitter, allocator: std.mem.Allocator) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
+        try self.potentialEndOfPreviousRow(allocator);
+        const num_states = self.action_table.items.len;
+        const state_bits = emitter.stateBits(num_states);
+        const tag_bits = emitter.tagBackingIntBits(self.symbol_spec);
+        try emitter.implementAction();
+        try emitter.out.writeAll(
+            \\        return switch (state) {
+            \\
+        );
+        for (self.action_table.items, 0..) |action_row, state| {
+            try emitter.out.print("{} => switch (lookahead) {{", .{state});
+            var terminals_written: u32 = @intCast(action_row.shifts.items.len);
+            for (action_row.shifts.items) |shift_entry| {
+                try emitter.out.print("{} => ", .{shift_entry.terminal});
+                if (shift_entry.terminal == self.symbol_spec.terminals.eoi) { // Accept
+                    @branchHint(.unlikely);
+                    try emitter.out.writeAll(".accept");
+                } else {
+                    try emitter.writeShiftAction(shift_entry.state);
+                }
+                try emitter.out.writeAll(", ");
+            }
+            for (action_row.reduces.items) |reduce_group| {
+                // The benefit of grouping reduce actions :)
+                for (reduce_group.lookaheads) |terminal| {
+                    try emitter.out.print("{},", .{terminal});
+                }
+                try emitter.out.writeAll(" => ");
+                try emitter.writeReduceAction(self.productions, reduce_group.production);
+                try emitter.out.writeAll(", ");
+                terminals_written += @intCast(reduce_group.lookaheads.len);
+            }
+            // Zig disallows extraneous else prong
+            if (terminals_written < (@as(u32, 1) << @intCast(tag_bits))) {
+                try emitter.out.writeAll("else => .reject");
+            }
+            try emitter.out.writeAll("},\n");
+        }
+        // Zig disallows extraneous else prong
+        if (num_states < (@as(usize, 1) << @intCast(state_bits))) {
+            try emitter.out.writeAll("else => unreachable\n");
+        }
+        try emitter.out.writeAll(
+            \\        };
+            \\
+        );
+        try emitter.endMethod();
+    }
+};
 
 // Conflict resolver template:
 // pub const Resolver = struct {
@@ -724,21 +975,47 @@ pub const ActionRow = std.HashMapUnmanaged(u32, Action, std.hash_map.AutoContext
 // };
 
 /// Emit Zig code to handle any LR-style ACTION table
-/// `std.ArrayList(SlrActionRow)`. A `ConflictResolver` of `void` means no
+/// `std.ArrayList(ActionRow)`. A `ConflictResolver_` of `void` means no
 /// conflict resolution.
-pub fn SwitchActionHandler(comptime ConflictResolver: type) type {
+pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
+    if (ConflictResolver_ == void) {
+        // We have specialized the case when no conflict resolution is needed
+        // (optimized code/data model).
+        return SwitchActionHandlerNoConflict;
+    }
     return struct {
         symbol_spec: *const sym.SymbolSpec,
         productions: *const cfg.CfgProductions,
         /// Optional conflict resolver
         conflict_resolver: ConflictResolver,
         /// ACTION[state][terminal]
-        action_table: std.ArrayList(ActionRow) = .empty,
+        action_table: std.ArrayList(ActionRow),
         // Following are for conflict reporting; they are undefined if no
         // conflict occurred.
-        conflicting_action1: Action = undefined,
-        conflicting_action2: Action = undefined,
-        conflicting_lookahead: u32 = undefined,
+        conflicting_action1: Action,
+        conflicting_action2: Action,
+        conflicting_lookahead: u32,
+
+        /// A row in a LR-style ACTION table. A hash map from terminal IDs to actions.
+        /// A terminal not in the hash map indicates an "error" action upon seeing that
+        /// terminal.
+        const ActionRow = std.HashMapUnmanaged(u32, Action, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage);
+
+        /// Reexport the conflict resolver type.
+        pub const ConflictResolver = ConflictResolver_;
+
+        pub fn init(allocator: std.mem.Allocator, symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, conflict_resolver: ConflictResolver) std.mem.Allocator.Error!@This() {
+            _ = allocator;
+            return .{
+                .symbol_spec = symbol_spec,
+                .productions = productions,
+                .conflict_resolver = conflict_resolver,
+                .action_table = .empty,
+                .conflicting_action1 = undefined,
+                .conflicting_action2 = undefined,
+                .conflicting_lookahead = undefined,
+            };
+        }
 
         pub fn free(self: *@This(), allocator: std.mem.Allocator) void {
             for (self.action_table.items) |*row| {
@@ -758,14 +1035,12 @@ pub fn SwitchActionHandler(comptime ConflictResolver: type) type {
             var replace = true;
             if (gop.found_existing) {
                 var resolved = false;
-                if (ConflictResolver != void) {
-                    const reduce_prod = gop.value_ptr.*.reduce;
-                    if (self.conflict_resolver.resolveShiftReduce(terminal, self.productions.lhs[reduce_prod])) |x| {
-                        resolved = true;
-                        switch (x) {
-                            .shift => {},
-                            .reduce => replace = false,
-                        }
+                const reduce_prod = gop.value_ptr.*.reduce;
+                if (self.conflict_resolver.resolveShiftReduce(terminal, self.productions.lhs[reduce_prod])) |x| {
+                    resolved = true;
+                    switch (x) {
+                        .shift => {},
+                        .reduce => replace = false,
                     }
                 }
                 if (!resolved) {
@@ -785,24 +1060,22 @@ pub fn SwitchActionHandler(comptime ConflictResolver: type) type {
             var replace = true;
             if (gop.found_existing) {
                 var resolved = false;
-                if (ConflictResolver != void) {
-                    switch (gop.value_ptr.*) {
-                        .shift => {
-                            if (self.conflict_resolver.resolveShiftReduce(terminal, self.productions.lhs[production])) |x| {
-                                resolved = true;
-                                switch (x) {
-                                    .shift => replace = false,
-                                    .reduce => {},
-                                }
+                switch (gop.value_ptr.*) {
+                    .shift => {
+                        if (self.conflict_resolver.resolveShiftReduce(terminal, self.productions.lhs[production])) |x| {
+                            resolved = true;
+                            switch (x) {
+                                .shift => replace = false,
+                                .reduce => {},
                             }
-                        },
-                        .reduce => |old_prod| {
-                            if (self.conflict_resolver.resolveReduceReduce(self.productions.lhs[old_prod], self.productions.lhs[production])) |which| {
-                                resolved = true;
-                                replace = which == 1;
-                            }
-                        },
-                    }
+                        }
+                    },
+                    .reduce => |old_prod| {
+                        if (self.conflict_resolver.resolveReduceReduce(self.productions.lhs[old_prod], self.productions.lhs[production])) |which| {
+                            resolved = true;
+                            replace = which == 1;
+                        }
+                    },
                 }
                 if (!resolved) {
                     self.conflicting_action1 = gop.value_ptr.*;
@@ -819,11 +1092,16 @@ pub fn SwitchActionHandler(comptime ConflictResolver: type) type {
             // `state` can be anything (shifting on EOI = accept)
             return self.shift(allocator, self.symbol_spec.terminals.eoi, 0);
         }
-        pub fn writeFeedMethod(self: @This(), emitter: ZigEmitter) std.Io.Writer.Error!void {
+        pub fn writeActionMethod(self: @This(), emitter: ZigEmitter, allocator: std.mem.Allocator) std.Io.Writer.Error!void {
+            _ = allocator;
             const num_states = self.action_table.items.len;
             const state_bits = emitter.stateBits(num_states);
             const tag_bits = emitter.tagBackingIntBits(self.symbol_spec);
             try emitter.implementAction();
+            try emitter.out.writeAll(
+                \\        return switch (state) {
+                \\
+            );
             for (self.action_table.items, 0..) |action_row, state| {
                 try emitter.out.print("{} => switch (lookahead) {{", .{state});
                 var it = action_row.iterator();
@@ -890,8 +1168,10 @@ pub fn SlrBackend(comptime ActionHandler: type, comptime GotoHandler: type) type
         emitter: ZigEmitter,
         /// Precomputed FOLLOW sets for SLR
         follow_sets: *const lr0.DpBasedSets,
+        /// Conflict resolver to forward to the action handler (borrowed)
+        conflict_resolver: ActionHandler.ConflictResolver,
         /// ACTION handler
-        action_handler: ActionHandler,
+        action_handler: ActionHandler = undefined,
         /// GOTO handler
         goto_handler: GotoHandler,
         /// If there is a conflict, it will be logged to here.
@@ -923,6 +1203,12 @@ pub fn SlrBackend(comptime ActionHandler: type, comptime GotoHandler: type) type
             self.allocator = allocator;
             self.symbol_spec = symbol_spec;
             self.productions = productions;
+            self.action_handler = try ActionHandler.init(
+                self.allocator,
+                symbol_spec,
+                productions,
+                self.conflict_resolver,
+            );
         }
         pub fn beginState(self: *@This()) Error!void {
             self.state_counter += 1;
@@ -961,19 +1247,31 @@ pub fn SlrBackend(comptime ActionHandler: type, comptime GotoHandler: type) type
             const nt = self.productions.lhs[production];
             const follow = self.follow_sets.get(nt);
             // Only reduce if lookahead token is in FOLLOW set of `nt`.
-            var it = follow.iterator(.{});
-            while (it.next()) |follow_token| {
-                self.action_handler.reduce(self.allocator, @intCast(follow_token), production) catch |err| {
+            if (std.meta.hasMethod(ActionHandler, "reduceMultiple")) {
+                // Action handler can choose to implement this more primitive
+                // method for optimization purposes.
+                std.debug.assert(!std.meta.hasMethod(ActionHandler, "reduce"));
+                self.action_handler.reduceMultiple(self.allocator, follow, production) catch |err| {
                     if (err == ConflictError.LrConflict) {
                         try self.onConflict();
                     }
                     return err;
                 };
+            } else {
+                var it = follow.iterator(.{});
+                while (it.next()) |follow_token| {
+                    self.action_handler.reduce(self.allocator, @intCast(follow_token), production) catch |err| {
+                        if (err == ConflictError.LrConflict) {
+                            try self.onConflict();
+                        }
+                        return err;
+                    };
+                }
             }
         }
         pub fn endTableGen(self: *@This()) Error!void {
             try self.emitter.writeProlog(self.symbol_spec);
-            try self.action_handler.writeFeedMethod(self.emitter);
+            try self.action_handler.writeActionMethod(self.emitter, self.allocator);
             const num_states = self.states.?.items.len;
             try self.goto_handler.writeGotoMethod(self.emitter, self.symbol_spec, @intCast(num_states));
             try self.emitter.writeEpilog(num_states);

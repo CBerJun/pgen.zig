@@ -24,5 +24,6 @@
         "pgenzig",
         "rdynamic",
         "Backus-Naur",
+        "lookaheads",
     ]
 }
