@@ -481,14 +481,19 @@ const DfaNeighborMap = struct {
 /// the lookahead is EOI), `reduce` (reduce using a given production, if you
 /// want SLR, backend should only reduce for lookahead in FOLLOW set), `goto`
 /// (GOTO table a.k.a state to go to if a nonterminal is produced), and `shift`
-/// (shift the given token and go to the given state). Conflict detection
+/// (shift the given token and go to the given state).
+///
+/// The calls that indicate the ACTION and GOTO of the state satisfy the
+/// following pattern:
+///     reduce* [acceptOnEoi] shift* goto*
+///
+/// Conflict detection
 /// is also backend's responsibility. If an error is encountered,
 /// `backend.endTableGen` may not be called, in which case the caller should
 /// still make sure any resources used by the backend is freed.
 /// The entry state is always 0.
 ///
 /// Guarantees for the method calls to `backend` for **a single state**:
-/// - `acceptOnEoi` is called at most once
 /// - Nonterminals in calls to `goto` are all distinct
 /// - Terminals in calls to `shift` are all distinct
 /// - Production IDs in calls to `reduce` are all distinct
@@ -530,6 +535,7 @@ pub fn lr0(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, tarjan:
         defer neighbor_goto.free(allocator);
 
         // Iterate through core set, which is a subset of closure
+        var accept_on_eoi = false;
         for (core_set) |core_item| {
             if (core_item.production == Item.augmented_production) {
                 @branchHint(.unlikely);
@@ -542,7 +548,8 @@ pub fn lr0(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, tarjan:
                         });
                     },
                     1 => {
-                        try backend.acceptOnEoi();
+                        std.debug.assert(!accept_on_eoi);
+                        accept_on_eoi = true;
                     },
                     // We never actually shift the EOI token. We accept.
                     else => unreachable,
@@ -573,7 +580,7 @@ pub fn lr0(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, tarjan:
         while (nt_it.next()) |nt| {
             var it = productions.of(symbol_spec, @intCast(nt));
             while (it.next()) |rule| {
-                // Dot is at position 0
+                // Dot is always at position 0 for non-core closure item
                 if (rule.rhs.len == 0) {
                     try backend.reduce(rule.id);
                 } else {
@@ -587,6 +594,10 @@ pub fn lr0(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, tarjan:
                     }
                 }
             }
+        }
+
+        if (accept_on_eoi) {
+            try backend.acceptOnEoi();
         }
 
         for (0..2) |pass| {
