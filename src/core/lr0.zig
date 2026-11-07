@@ -487,10 +487,9 @@ const DfaNeighborMap = struct {
 /// following pattern:
 ///     reduce* [acceptOnEoi] shift* goto*
 ///
-/// Conflict detection
-/// is also backend's responsibility. If an error is encountered,
-/// `backend.endTableGen` may not be called, in which case the caller should
-/// still make sure any resources used by the backend is freed.
+/// Conflict detection is also backend's responsibility. If an error is
+/// encountered, `backend.endTableGen` may not be called, in which case the
+/// caller should still make sure any resources used by the backend is freed.
 /// The entry state is always 0.
 ///
 /// Guarantees for the method calls to `backend` for **a single state**:
