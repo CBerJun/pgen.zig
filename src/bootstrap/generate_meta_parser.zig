@@ -71,7 +71,16 @@ pub fn main(init: std.process.Init) !void {
         .goto_handler = .{},
     };
     defer backend.free();
-    try pgen_core.lr0.lr0(meta_cfg.meta_symbol_spec, meta_cfg.meta_productions, tarjan, reachability, @TypeOf(backend), &backend, allocator);
+    try pgen_core.lr0.lr0(
+        meta_cfg.meta_symbol_spec,
+        meta_cfg.meta_productions,
+        tarjan,
+        reachability,
+        @TypeOf(backend),
+        &backend,
+        allocator,
+        false,
+    );
     try writer.flush();
 }
 

@@ -928,7 +928,6 @@ const SwitchActionHandlerNoConflict = struct {
         self.current_row.beginRow();
     }
     pub fn shift(self: *@This(), allocator: std.mem.Allocator, terminal: u32, new_state: u32) ActionError!void {
-        std.debug.print("state: {}\tshift: {},{}\n", .{ self.action_table.items.len, terminal, new_state });
         if (self.current_row.occupied.isSet(terminal)) {
             self.conflicting_lookahead = terminal;
             self.conflicting_action1 = .{ .shift = new_state };

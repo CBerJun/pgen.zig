@@ -15,6 +15,7 @@ const ParsedArgs = struct {
     in_file_path: []u8 = &.{},
     out_file_path: []u8 = &.{},
     dump_cfg: bool = false,
+    dump_states: bool = false,
     help: bool = false,
 
     pub fn deinit(self: *@This()) void {
@@ -45,6 +46,7 @@ const CliParser = struct {
         \\
         \\Debug options for developers:
         \\    -dump-cfg         Dump generated CFG
+        \\    -dump-states      Dump states and their core sets (use with -dump-cfg)
         \\
     ;
 
@@ -132,6 +134,8 @@ const CliParser = struct {
                 ans.help = true;
             } else if (std.mem.eql(u8, rest, "dump-cfg")) {
                 ans.dump_cfg = true;
+            } else if (std.mem.eql(u8, rest, "dump-states")) {
+                ans.dump_states = true;
             } else {
                 self.aggregator.add(.fatal, "unrecognized argument -{s}", .{rest});
                 return error.CliParseError;
@@ -204,6 +208,7 @@ fn mainInner(init: std.process.Init, gpa: std.mem.Allocator, stderr: *std.Io.Wri
         .cst_owns_token = cli.cst_owns_token,
         .token_extra = &.{cli.token_extra},
         .dump_cfg = cli.dump_cfg,
+        .dump_states = cli.dump_states,
     });
     driver.go() catch |err| return switch (err) {
         error.GrammarError => error.UserError, // Already logged

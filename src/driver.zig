@@ -30,6 +30,7 @@ pub const Driver = struct {
         cst_owns_token: bool = false,
         token_extra: []const []const u8 = &.{},
         dump_cfg: bool = false,
+        dump_states: bool = false,
     };
 
     pub fn init(allocator: std.mem.Allocator, input: *std.Io.Reader, stderr: *std.Io.Writer, output: *std.Io.Writer, config: Config) @This() {
@@ -158,6 +159,7 @@ pub const Driver = struct {
                     @TypeOf(backend),
                     &backend,
                     self.allocator,
+                    self.config.dump_states,
                 ) catch |err| return switch (err) {
                     error.LrConflict => blk: {
                         try self.stderr.writeAll("table gen conflict: grammar is ambiguous or not compatible with the selected algorithm\n");

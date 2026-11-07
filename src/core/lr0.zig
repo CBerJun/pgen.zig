@@ -1,6 +1,7 @@
 //! LR(0) and SLR related algorithms
 
 const std = @import("std");
+const builtin = @import("builtin");
 const digraph = @import("./digraph.zig");
 const cfg = @import("./cfg.zig");
 const sym = @import("./sym.zig");
@@ -496,7 +497,16 @@ const DfaNeighborMap = struct {
 /// - Nonterminals in calls to `goto` are all distinct
 /// - Terminals in calls to `shift` are all distinct
 /// - Production IDs in calls to `reduce` are all distinct
-pub fn lr0(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, tarjan: digraph.TarjanSccResult, first_reachability: digraph.ReachDpResult, comptime Backend: type, backend: *Backend, allocator: std.mem.Allocator) (Backend.Error || std.mem.Allocator.Error)!void {
+pub fn lr0(
+    symbol_spec: sym.SymbolSpec,
+    productions: cfg.CfgProductions,
+    tarjan: digraph.TarjanSccResult,
+    first_reachability: digraph.ReachDpResult,
+    comptime Backend: type,
+    backend: *Backend,
+    allocator: std.mem.Allocator,
+    debug_dump_states: bool, // always disabled on freestanding target
+) (Backend.Error || std.mem.Allocator.Error)!void {
     // States are never removed from `states_map`, so use arena for allocating
     // core item sets.
     var arena: std.heap.ArenaAllocator = .init(allocator);
@@ -527,6 +537,19 @@ pub fn lr0(symbol_spec: sym.SymbolSpec, productions: cfg.CfgProductions, tarjan:
     while (state < states.items.len) : (state += 1) {
         const core_set = states.items[state];
         try backend.beginState();
+
+        // std.debug.print not available on freestanding OS
+        if (builtin.target.os.tag != .freestanding and debug_dump_states) {
+            std.debug.print("state {} core\n", .{state});
+            for (core_set) |item| {
+                if (item.production == Item.augmented_production) {
+                    std.debug.print("  p=augmented", .{});
+                } else {
+                    std.debug.print("  p={}", .{item.production});
+                }
+                std.debug.print(" dot={}\n", .{item.dot});
+            }
+        }
 
         var neighbor_shift: DfaNeighborMap = .empty;
         defer neighbor_shift.free(allocator);
