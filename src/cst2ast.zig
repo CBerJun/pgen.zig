@@ -4,6 +4,7 @@ const pgen_core = @import("pgen_core");
 const ast = pgen_core.ast;
 const sym = pgen_core.sym;
 const diagnostic = pgen_core.diagnostic;
+const cr = pgen_core.conflict_resolver;
 
 /// Managed `ast.Ebnf` with arena allocators and `ExprPool` which holds
 /// the rhs EBNF nodes. This won't work if you have multiple `ast.Ebnf`s
@@ -17,6 +18,8 @@ pub const EbnfManaged = struct {
     sym_diagnostic: ?sym.DiagnosticInfo,
     /// The pool from which all `Expr`s in `productions` are interned.
     pool: ast.ExprPool,
+    /// Built conflict resolver
+    cr_resolver: ?cr.Resolver,
     /// The arena for `productions` and `pool`.
     expr_arena: ?*std.heap.ArenaAllocator,
     /// The arena for `symbol_spec`.
@@ -52,11 +55,12 @@ pub const EbnfManaged = struct {
         const expr_allocator = expr_arena.allocator();
         var pool: ast.ExprPool = .init(expr_allocator);
         errdefer pool.deinit(); // In fact unnecessary
-        const symbol_spec, const productions, const sym_diagnostic = try cstToEbnf(
+        const symbol_spec, const productions, const sym_diagnostic, const cr_resolver = try cstToEbnf(
             cst,
             &pool,
             expr_allocator,
             symbol_arena.allocator(),
+            allocator,
             allocator,
             scrap_allocator,
             aggregator,
@@ -69,6 +73,7 @@ pub const EbnfManaged = struct {
             .symbol_arena = symbol_arena,
             .pool = pool,
             .allocator = allocator,
+            .cr_resolver = cr_resolver,
         };
     }
 
@@ -98,6 +103,12 @@ pub const EbnfManaged = struct {
         return self.sym_diagnostic.?;
     }
 
+    /// Transfer `cr_resolver`'s ownership
+    pub fn ownedConflictResolver(self: *@This()) cr.Resolver {
+        defer self.cr_resolver = null;
+        return self.cr_resolver.?;
+    }
+
     pub fn deinit(self: *@This()) void {
         self.deinitExpr();
         if (self.symbol_arena) |arena| {
@@ -107,6 +118,10 @@ pub const EbnfManaged = struct {
         if (self.sym_diagnostic) |sd| {
             var sd_ = sd;
             sd_.deinit();
+        }
+        if (self.cr_resolver) |cr_resolver| {
+            var cr_resolver_ = cr_resolver;
+            cr_resolver_.deinit();
         }
         self.* = undefined;
     }
@@ -118,12 +133,22 @@ pub const SemanticError = error{
 
 /// Convert grammar CST to intermediate EBNF form, allocating memory using
 /// `expr_allocator` (for `EbnfProductions`), `symbol_allocator`
-/// (for `SymbolSpec`), `sym_diagnostic_allocator` (for `DiagnosticInfo`).
+/// (for `SymbolSpec`), `sym_diagnostic_allocator` (for `DiagnosticInfo`),
+/// `cr_allocator` (for conflict resolver).
 /// Memory owned by CST (including tokens) are not freed or reused. It is OK
 /// and encouraged to pass in arena allocators for `expr_allocator` or
 /// `symbol_allocator`. On error, it is not possible to remove already-interned
 /// expressions in `pool`.
-pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.Allocator, symbol_allocator: std.mem.Allocator, sym_diagnostic_allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator, aggregator: *diagnostic.Aggregator) (SemanticError || std.mem.Allocator.Error)!struct { sym.SymbolSpec, ast.EbnfProductions, sym.DiagnosticInfo } {
+pub fn cstToEbnf(
+    cst: psr.CstNode,
+    pool: *ast.ExprPool,
+    expr_allocator: std.mem.Allocator,
+    symbol_allocator: std.mem.Allocator,
+    sym_diagnostic_allocator: std.mem.Allocator,
+    cr_allocator: std.mem.Allocator,
+    scrap_allocator: std.mem.Allocator,
+    aggregator: *diagnostic.Aggregator,
+) (SemanticError || std.mem.Allocator.Error)!struct { sym.SymbolSpec, ast.EbnfProductions, sym.DiagnosticInfo, cr.Resolver } {
     // Pass 1: Collect terminals and nonterminals
     var named_terminals_map: std.StringHashMapUnmanaged(u32) = .empty;
     defer named_terminals_map.deinit(scrap_allocator); // Strings are borrowed
@@ -180,11 +205,37 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.
         }
     }
     grammar_it.eatToken().assertTag(.@".}");
+
+    // Entry declaration
     grammar_it.eatToken().assertTag(.@"k.entry");
     const entry_token = grammar_it.eatToken();
     entry_token.assertTag(.WORD);
     const entry_nt_string = entry_token.payload.word;
     grammar_it.eatToken().assertTag(.@".;");
+
+    // Precedence and priority blocks
+    // We save them to convert later since we need the terminals/nonterminals
+    // to be labelled before we can understand the precedence/priority rules.
+    var precedence_state: ?psr.NtChildrenIterator.State = null;
+    var priority_state: ?psr.NtChildrenIterator.State = null;
+    while (grammar_it.peek().?.* == .leaf) {
+        switch (grammar_it.eatToken().tag) {
+            .@"k.precedence" => {
+                grammar_it.eatToken().assertTag(.@".{");
+                precedence_state = grammar_it.saveState();
+                // Skip all internal nodes plus one more node (the @".}")
+                while (grammar_it.eat().* == .internal) {}
+            },
+            .@"k.priority" => {
+                grammar_it.eatToken().assertTag(.@".{");
+                priority_state = grammar_it.saveState();
+                while (grammar_it.eat().* == .internal) {}
+            },
+            else => unreachable,
+        }
+    }
+
+    // Production list
     const grammar_it_production_start = grammar_it.saveState();
     var node_forming_nt_count: u32 = 0;
     while (grammar_it.next()) |production_node| {
@@ -399,14 +450,137 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.
             terminal_id += 1;
         }
     }
+
+    // Create `SymbolManager` now that everything is labelled
+    const symbol_manager: SymbolManager = .{
+        .named_terminals_map = &named_terminals_map,
+        .literal_terminals_map = &literal_terminals_map,
+        .nonterminals_map = &nonterminals_map,
+    };
+
+    var cr_sr_builder: cr.ShiftReduceBuilder = .init(aggregator, cr_allocator);
+    defer cr_sr_builder.deinit();
+    // Resolve precedence block
+    if (precedence_state) |target_state| {
+        grammar_it.loadState(target_state);
+        while (true) {
+            const node = grammar_it.eat();
+            if (node.* == .leaf) {
+                node.leaf.assertTag(.@".}");
+                break;
+            }
+            var it = node.internal.iteratorOf(.precedence_decl);
+            const nt_token = it.eatToken();
+            nt_token.assertTag(.WORD);
+            const nt = switch (try symbol_manager.resolveWordToken(nt_token, aggregator)) {
+                .terminal => return fatalAt(
+                    aggregator,
+                    nt_token,
+                    "precedence left hand side must be a nonterminal; '{s}' is a terminal",
+                    .{nt_token.payload.word},
+                ),
+                .nonterminal => |nt| nt,
+            };
+            const rel_token = it.eatToken();
+            const rel: cr.ShiftReduceDecision = switch (rel_token.tag) {
+                .@".>" => .reduce,
+                .@".<" => .shift,
+                else => unreachable,
+            };
+            const terminal_token = it.eatToken();
+            const terminal = switch (terminal_token.tag) {
+                .WORD => switch (try symbol_manager.resolveWordToken(terminal_token, aggregator)) {
+                    .terminal => |tid| tid,
+                    .nonterminal => return fatalAt(
+                        aggregator,
+                        terminal_token,
+                        "precedence right hand side must be a terminal; '{s}' is nonterminal",
+                        .{terminal_token.payload.word},
+                    ),
+                },
+                .STRING => symbol_manager.resolveLiteralToken(terminal_token) orelse return fatalAt(
+                    aggregator,
+                    terminal_token,
+                    // TODO: stringify the literal token
+                    "literal token is never used in any production",
+                    .{},
+                ),
+                else => unreachable,
+            };
+            cr_sr_builder.addRule(nt, terminal, rel) catch |err| return switch (err) {
+                error.InvalidConflictResolveRule => SemanticError.Cst2AstSemanticError,
+                else => |e| e,
+            };
+        }
+    }
+    var cr_sr_map = cr_sr_builder.retrieve();
+    errdefer cr_sr_map.deinit();
+
+    var cr_rr_builder = try cr.ReduceReduceBuilder.init(nonterminal_count, aggregator, cr_allocator);
+    defer cr_rr_builder.deinit();
+    // Resolve priority block
+    if (priority_state) |target_state| {
+        grammar_it.loadState(target_state);
+        while (true) {
+            const node = grammar_it.eat();
+            if (node.* == .leaf) {
+                node.leaf.assertTag(.@".}");
+                break;
+            }
+            var it = node.internal.iteratorOf(.priority_decl);
+            const first_word = it.eatToken();
+            first_word.assertTag(.WORD);
+            var lhs = switch (try symbol_manager.resolveWordToken(first_word, aggregator)) {
+                .terminal => return fatalAt(
+                    aggregator,
+                    first_word,
+                    "priority operand must be a nonterminal; '{s}' is a terminal",
+                    .{first_word.payload.word},
+                ),
+                .nonterminal => |nt| nt,
+            };
+            const rel: enum { lt, gt } = switch (it.peek().?.leaf.tag) {
+                .@".<" => .lt,
+                .@".>" => .gt,
+                else => unreachable,
+            };
+            // All later operators are the same per the grammar (either all >
+            // or all <)
+            while (it.eatToken().tag != .@".;") {
+                const word = it.eatToken();
+                word.assertTag(.WORD);
+                const rhs = switch (try symbol_manager.resolveWordToken(word, aggregator)) {
+                    .terminal => return fatalAt(
+                        aggregator,
+                        word,
+                        "priority operand must be a nonterminal; '{s}' is a terminal",
+                        .{word.payload.word},
+                    ),
+                    .nonterminal => |nt| nt,
+                };
+                (switch (rel) {
+                    .lt => cr_rr_builder.addGreaterThan(rhs, lhs),
+                    .gt => cr_rr_builder.addGreaterThan(lhs, rhs),
+                }) catch |err| return switch (err) {
+                    error.InvalidConflictResolveRule => SemanticError.Cst2AstSemanticError,
+                    else => |e| e,
+                };
+                lhs = rhs; // Current RHS is next relation's LHS
+            }
+        }
+    }
+    var cr_rr_resolver = cr_rr_builder.retrieve() catch |err| return switch (err) {
+        error.InvalidConflictResolveRule => SemanticError.Cst2AstSemanticError,
+        else => |e| e,
+    };
+    errdefer cr_rr_resolver.deinit();
+
     // Pass 2: Productions
     var productions = try expr_allocator.alloc(*const ast.Expr, nonterminal_count);
     errdefer expr_allocator.free(productions);
     grammar_it.loadState(grammar_it_production_start);
     const converter: CstRhsToAst = .{
-        .named_terminals_map = &named_terminals_map,
-        .literal_terminals_map = &literal_terminals_map,
-        .nonterminals_map = &nonterminals_map,
+        .symbol_manager = &symbol_manager,
         .pool = pool,
         .aggregator = aggregator,
     };
@@ -436,7 +610,10 @@ pub fn cstToEbnf(cst: psr.CstNode, pool: *ast.ExprPool, expr_allocator: std.mem.
             .node_forming_count = node_forming_nt_count,
             .names = node_forming_nt_names.ptr,
         },
-    }, productions.ptr, sym_diagnostic };
+    }, productions.ptr, sym_diagnostic, cr.Resolver{
+        .sr = cr_sr_map,
+        .rr = cr_rr_resolver,
+    } };
 }
 
 /// Convenience function for `cstToEbnf`.
@@ -453,10 +630,56 @@ fn fatalAt(aggregator: *diagnostic.Aggregator, token: *const psr.Token, comptime
     } ++ args);
 }
 
-const CstRhsToAst = struct {
+// Manages terminals/nonterminals during cst2ast.
+const SymbolManager = struct {
     named_terminals_map: *const std.StringHashMapUnmanaged(u32),
     literal_terminals_map: *const std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(u32)),
     nonterminals_map: *const std.StringHashMapUnmanaged(u32),
+
+    pub const ResolvedId = union(enum) {
+        terminal: u32,
+        nonterminal: u32,
+    };
+
+    /// Resolve an identifier
+    pub fn resolveId(self: @This(), id: []const u8) ?ResolvedId {
+        if (self.nonterminals_map.get(id)) |nt| {
+            return .{ .nonterminal = nt };
+        } else if (self.named_terminals_map.get(id)) |tid| {
+            return .{ .terminal = tid };
+        } else {
+            return null;
+        }
+    }
+
+    /// Resolve an identifier that appeared in source grammar (with a given
+    /// `WORD` token). Log an error if identifier is undefined.
+    pub fn resolveWordToken(self: @This(), token: *const psr.Token, aggregator: *diagnostic.Aggregator) SemanticError!ResolvedId {
+        return self.resolveId(token.payload.word) orelse fatalAt(
+            aggregator,
+            token,
+            "undefined identifier '{s}'",
+            .{token.payload.word},
+        );
+    }
+
+    /// Resolve a literal token (suffixed string); return terminal ID
+    pub fn resolveLiteral(self: @This(), content: []const u8, suffix: []const u8) ?u32 {
+        if (self.literal_terminals_map.get(suffix)) |hashmap| {
+            if (hashmap.get(content)) |tid| {
+                return tid;
+            }
+        }
+        return null;
+    }
+
+    pub fn resolveLiteralToken(self: @This(), token: *const psr.Token) ?u32 {
+        return self.resolveLiteral(token.payload.str.content, token.payload.str.suffix);
+    }
+};
+
+const CstRhsToAst = struct {
+    symbol_manager: *const SymbolManager,
     pool: *ast.ExprPool,
     aggregator: *diagnostic.Aggregator,
 
@@ -518,26 +741,17 @@ const CstRhsToAst = struct {
         switch (first.tag) {
             .WORD => {
                 std.debug.assert(it.done());
-                const word = first.payload.word;
-                if (self.nonterminals_map.get(word)) |nt| {
-                    return self.pool.makeNonterminal(nt);
-                } else if (self.named_terminals_map.get(word)) |tid| {
-                    return self.pool.makeTerminal(tid);
-                } else {
-                    // We did not check for this in 1st Pass.
-                    return fatalAt(
-                        self.aggregator,
-                        first,
-                        "undefined identifier '{s}'",
-                        .{word},
-                    );
-                }
+                // We did not check for undefined identifier in 1st Pass.
+                return switch (try self.symbol_manager.resolveWordToken(first, self.aggregator)) {
+                    .terminal => |tid| self.pool.makeTerminal(tid),
+                    .nonterminal => |nt| self.pool.makeNonterminal(nt),
+                };
             },
             .STRING => {
                 std.debug.assert(it.done());
-                const s = first.payload.str;
-                const tid = self.literal_terminals_map.get(s.suffix).?.get(s.content).?;
-                return self.pool.makeTerminal(tid);
+                // All literal tokens used are automatically defined, so
+                // the lookup must succeed.
+                return self.pool.makeTerminal(self.symbol_manager.resolveLiteralToken(first).?);
             },
             .@".(" => {
                 const inner = it.eatNt().*;

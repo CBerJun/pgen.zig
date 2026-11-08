@@ -93,6 +93,18 @@ tokens {
 
 entry entry_nonterminal;
 
+precedence {
+    # Optional block used to resolve shift-reduce conflicts (WIP!!)
+    nonterminal1 > terminal1;
+    nonterminal2 < terminal2;
+}
+
+priority {
+    # Optional block used to resolve reduce-reduce conflicts (WIP!!)
+    nonterminal1 > nonterminal2 > nonterminal3;
+    other_nonterminal1 < nonterminal2;
+}
+
 entry_nonterminal:
     # ... <right hand side>
     ;

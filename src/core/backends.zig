@@ -981,8 +981,9 @@ const SwitchActionHandlerNoConflict = struct {
 
 // Conflict resolver template:
 // pub const Resolver = struct {
-//     fn resolveShiftReduce(self: *@This(), terminal: u32, nonterminal: u32) ?enum{shift, reduce} {}
-//     fn resolveReduceReduce(self: *@This(), nonterminals: [2]u32) ?u1 {}
+//     pub const Error = error{};
+//     pub fn resolveShiftReduce(self: *@This(), terminal: u32, nonterminal: u32) Error!?enum{shift, reduce} {}
+//     pub fn resolveReduceReduce(self: *@This(), nonterminals: [2]u32) Error!?u1 {}
 // };
 
 /// Emit Zig code to handle any LR-style ACTION table. A `ConflictResolver_`
@@ -1185,7 +1186,7 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
         }
         // Remember reduce callbacks get called prior to shift callbacks for
         // any given state.
-        pub fn reduceMultiple(self: *@This(), allocator: std.mem.Allocator, terminals: std.DynamicBitSetUnmanaged, production: u32) ActionError!void {
+        pub fn reduceMultiple(self: *@This(), allocator: std.mem.Allocator, terminals: std.DynamicBitSetUnmanaged, production: u32) (ActionError || ConflictResolver.Error)!void {
             const state: u32 = @intCast(self.action_table.items.len);
             var it = terminals.iterator(.{});
             const group_index: u32 = self.current_row.reduce_len;
@@ -1199,7 +1200,7 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
                     if (existing.state == state) {
                         // Oops, reduce-reduce conflict!
                         const reduce_group = self.current_row.getReduce(existing.group_index);
-                        if (self.conflict_resolver.resolveReduceReduce(.{
+                        if (try self.conflict_resolver.resolveReduceReduce(.{
                             self.productions.lhs[reduce_group.production],
                             self.productions.lhs[production],
                         })) |which| {
@@ -1237,7 +1238,7 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
                 self.current_row.popReduce();
             }
         }
-        pub fn shift(self: *@This(), allocator: std.mem.Allocator, terminal: u32, new_state: u32) ActionError!void {
+        pub fn shift(self: *@This(), allocator: std.mem.Allocator, terminal: u32, new_state: u32) (ActionError || ConflictResolver.Error)!void {
             const state: u32 = @intCast(self.action_table.items.len);
             // Check for conflict
             // The shift action does not go into the lazy array at all since
@@ -1249,7 +1250,7 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
                 if (existing.state == state) {
                     // Oops, shift-reduce conflict
                     const reduce_group = self.current_row.getReduce(existing.group_index);
-                    if (self.conflict_resolver.resolveShiftReduce(terminal, self.productions.lhs[reduce_group.production])) |x| {
+                    if (try self.conflict_resolver.resolveShiftReduce(terminal, self.productions.lhs[reduce_group.production])) |x| {
                         switch (x) {
                             .shift => {
                                 // Replace reduce with shift
@@ -1341,7 +1342,7 @@ pub fn SlrBackend(comptime ActionHandler: type, comptime GotoHandler: type) type
                 cr.free(self.allocator);
         }
 
-        pub const Error = ConflictError || std.Io.Writer.Error || std.mem.Allocator.Error;
+        pub const Error = ConflictError || std.Io.Writer.Error || std.mem.Allocator.Error || (if (ActionHandler.ConflictResolver == void) error{} else ActionHandler.ConflictResolver.Error);
 
         pub fn beginTableGen(self: *@This(), symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, states: *const std.ArrayList([]lr0.Item), allocator: std.mem.Allocator) Error!void {
             self.states = states;

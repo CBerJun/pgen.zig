@@ -12,6 +12,8 @@ const Nt = enum(u8) {
     rhs_factor,
     rhs,
     nonterminal_qualifier,
+    precedence_decl,
+    priority_decl,
     _,
 };
 
@@ -28,6 +30,8 @@ const Sym = enum(u8) {
     @":",
     @"|",
     @"+",
+    @">",
+    @"<",
 };
 /// Keywords. Correspond to ""k suffix in meta_grammar.txt.
 const Keyword = enum(u8) {
@@ -35,6 +39,8 @@ const Keyword = enum(u8) {
     tokens,
     entry,
     nodeless,
+    precedence,
+    priority,
 };
 /// Named terminals.
 const Terminal = enum(u8) {
@@ -227,19 +233,57 @@ pub fn main(init: std.process.Init) !void {
 fn buildProductions(pm: *ProductionManager, aux_manager: *AuxNtManager) !void {
     const token_decl_list = try aux_manager.newAux();
     const production_list = try aux_manager.newAux();
+    const opt_precedence_block = try aux_manager.newAux();
+    const opt_priority_block = try aux_manager.newAux();
     try pm.prod(.grammar, .{
-        Keyword.tokens, Sym.@"{",      token_decl_list, Sym.@"}",
-        Keyword.entry,  Terminal.WORD, Sym.@";",        production_list,
+        Keyword.tokens,     Sym.@"{",        token_decl_list, Sym.@"}",
+        Keyword.entry,      Terminal.WORD,   Sym.@";",        opt_precedence_block,
+        opt_priority_block, production_list,
     });
     try pm.prod(token_decl_list, .{Nt.token_decl});
     try pm.prod(token_decl_list, .{ token_decl_list, Nt.token_decl });
     try pm.prod(production_list, .{Nt.production});
     try pm.prod(production_list, .{ production_list, Nt.production });
+    const precedence_list = try aux_manager.newAux();
+    try pm.prod(opt_precedence_block, .{});
+    try pm.prod(opt_precedence_block, .{ Keyword.precedence, Sym.@"{", precedence_list, Sym.@"}" });
+    try pm.prod(precedence_list, .{});
+    try pm.prod(precedence_list, .{ precedence_list, Nt.precedence_decl });
+    const priority_list = try aux_manager.newAux();
+    try pm.prod(opt_priority_block, .{});
+    try pm.prod(opt_priority_block, .{ Keyword.priority, Sym.@"{", priority_list, Sym.@"}" });
+    try pm.prod(priority_list, .{});
+    try pm.prod(priority_list, .{ priority_list, Nt.priority_decl });
     try pm.prod(.token_decl, .{ Terminal.WORD, Sym.@";" });
     try pm.prod(.token_decl, .{ Terminal.STRING, Sym.@";" });
     try pm.prod(.production, .{ Nt.nonterminal_qualifier, Terminal.WORD, Sym.@":", Nt.rhs, Sym.@";" });
     try pm.prod(.nonterminal_qualifier, .{});
     try pm.prod(.nonterminal_qualifier, .{Keyword.nodeless});
+
+    const lt_or_gt = try aux_manager.newAux();
+    const word_or_string = try aux_manager.newAux();
+    try pm.prod(.precedence_decl, .{ Terminal.WORD, lt_or_gt, word_or_string });
+    try pm.prod(lt_or_gt, .{Sym.@"<"});
+    try pm.prod(lt_or_gt, .{Sym.@">"});
+    try pm.prod(word_or_string, .{Terminal.WORD});
+    try pm.prod(word_or_string, .{Terminal.STRING});
+
+    {
+        const lt_operand = try aux_manager.newAux();
+        const lt_tail = try aux_manager.newAux();
+        try pm.prod(lt_operand, .{ Sym.@"<", Terminal.WORD });
+        try pm.prod(lt_tail, .{lt_operand});
+        try pm.prod(lt_tail, .{ lt_tail, lt_operand });
+        const gt_operand = try aux_manager.newAux();
+        const gt_tail = try aux_manager.newAux();
+        try pm.prod(gt_operand, .{ Sym.@">", Terminal.WORD });
+        try pm.prod(gt_tail, .{gt_operand});
+        try pm.prod(gt_tail, .{ gt_tail, gt_operand });
+        const tail = try aux_manager.newAux();
+        try pm.prod(tail, .{lt_tail});
+        try pm.prod(tail, .{gt_tail});
+        try pm.prod(.priority_decl, .{ Terminal.WORD, tail, Sym.@";" });
+    }
 
     try pm.prod(.rhs_atom, .{Terminal.WORD});
     try pm.prod(.rhs_atom, .{Terminal.STRING});

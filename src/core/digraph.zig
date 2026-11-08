@@ -38,6 +38,64 @@ pub const Digraph = struct {
         return ans;
     }
 
+    /// Does there exist a path from `from` to `to` in `graph`? Linear time.
+    pub fn pathExists(self: @This(), allocator: std.mem.Allocator, from: u32, to: u32) std.mem.Allocator.Error!bool {
+        // Just a normal DFS
+        var stack: std.ArrayList(u32) = .empty;
+        defer stack.deinit(allocator);
+        var vis = try std.DynamicBitSetUnmanaged.initEmpty(allocator, self.n);
+        defer vis.deinit(allocator);
+        try stack.append(allocator, from);
+        vis.set(from);
+        while (stack.pop()) |at| {
+            if (at == to) {
+                return true;
+            }
+            for (self.succ[at]) |neighbor| {
+                if (vis.isSet(neighbor)) continue;
+                try stack.append(allocator, neighbor);
+                vis.set(neighbor);
+            }
+        }
+        return false;
+    }
+
+    /// Kahn's algorithm (in-degree counting) for topological sort; result
+    /// stored into `answer`. Return the length of the resulting sequence
+    /// produced (may be less than `n` if there is cycle).
+    pub fn topologicalSort(self: @This(), allocator: std.mem.Allocator, answer: [*]u32) std.mem.Allocator.Error!u32 {
+        var degree = try allocator.alloc(u32, self.n); // in degree left of each node
+        defer allocator.free(degree);
+        var work: std.ArrayList(u32) = .empty; // work list of nodes with degree=0
+        defer work.deinit(allocator);
+        // Initialize `degree` with in degrees
+        @memset(degree, 0);
+        for (self.succ[0..self.n]) |adj| {
+            for (adj) |u| {
+                degree[u] += 1;
+            }
+        }
+        // Initialize `work` with nodes without in-edge
+        for (0..self.n) |u| {
+            if (degree[u] == 0) {
+                try work.append(allocator, @intCast(u));
+            }
+        }
+        // Main loop (keep visiting nodes until work list empty)
+        var n_visited: u32 = 0;
+        while (work.pop()) |u| {
+            answer[n_visited] = u;
+            n_visited += 1;
+            for (self.succ[u]) |v| {
+                degree[v] -= 1;
+                if (degree[v] == 0) {
+                    try work.append(allocator, v);
+                }
+            }
+        }
+        return n_visited;
+    }
+
     /// Tarjan's SCC algorithm
     pub fn tarjanScc(self: @This(), allocator: std.mem.Allocator) std.mem.Allocator.Error!TarjanSccResult {
         // Temporary data structures

@@ -27,5 +27,6 @@
         "lookaheads",
         "BBST",
         "inited",
+        "irreflexive",
     ]
 }
