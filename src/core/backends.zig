@@ -1199,7 +1199,10 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
                     if (existing.state == state) {
                         // Oops, reduce-reduce conflict!
                         const reduce_group = self.current_row.getReduce(existing.group_index);
-                        if (self.conflict_resolver.resolveReduceReduce(self.productions.lhs[reduce_group.production], self.productions.lhs[production])) |which| {
+                        if (self.conflict_resolver.resolveReduceReduce(.{
+                            self.productions.lhs[reduce_group.production],
+                            self.productions.lhs[production],
+                        })) |which| {
                             if (which == 1) {
                                 // Replace with new reduce
                                 reduce_group.lookaheads.unset(terminal);
