@@ -613,6 +613,8 @@ pub fn cstToEbnf(
     }, productions.ptr, sym_diagnostic, cr.Resolver{
         .sr = cr_sr_map,
         .rr = cr_rr_resolver,
+        .relabeling = null,
+        .relabeling_allocator = cr_allocator,
     } };
 }
 

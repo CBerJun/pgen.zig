@@ -1075,7 +1075,7 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
                 if (self.reduce_len == self.raw_reduces.items.len) {
                     // If not enough space, allocate new
                     // initEmpty is not important (bits can be undefined)
-                    const new_lookaheads = try std.DynamicBitSetUnmanaged.initEmpty(allocator, lookaheads.bit_length);
+                    var new_lookaheads = try std.DynamicBitSetUnmanaged.initEmpty(allocator, lookaheads.bit_length);
                     errdefer new_lookaheads.deinit(allocator);
                     try self.raw_reduces.append(allocator, .{
                         .lookaheads = new_lookaheads,
@@ -1084,7 +1084,7 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
                 }
                 const group = &self.raw_reduces.items[self.reduce_len];
                 group.production = production;
-                const num_masks = std.math.divCeil(u32, lookaheads.bit_length, @typeInfo(std.DynamicBitSetUnmanaged.MaskInt).int.bits) catch unreachable;
+                const num_masks = std.math.divCeil(usize, lookaheads.bit_length, @typeInfo(std.DynamicBitSetUnmanaged.MaskInt).int.bits) catch unreachable;
                 @memcpy(group.lookaheads.masks[0..num_masks], lookaheads.masks[0..num_masks]);
                 self.reduce_len += 1;
             }
@@ -1116,7 +1116,7 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
                     var it = raw.lookaheads.iterator(.{});
                     var j: u32 = 0;
                     while (it.next()) |lookahead| {
-                        lookaheads[j] = lookahead;
+                        lookaheads[j] = @intCast(lookahead);
                         j += 1;
                     }
                     reduces_slice[i] = .{
@@ -1164,6 +1164,7 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
                 row.deinit(allocator);
             }
             self.action_table.deinit(allocator);
+            self.current_row.deinit(allocator);
             self.has_lazy.deinit(allocator);
             allocator.free(self.lazy);
             self.* = undefined;
@@ -1174,7 +1175,7 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
         fn potentialEndOfPreviousRow(self: *@This(), allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
             if (self.started_first_row) {
                 @branchHint(.likely);
-                var row = try self.current_row.endRow();
+                var row = try self.current_row.endRow(allocator);
                 errdefer row.deinit(allocator);
                 try self.action_table.append(allocator, row);
             } else {
@@ -1216,7 +1217,7 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
                             // Unresolved conflict
                             self.conflicting_action1 = .{ .reduce = reduce_group.production };
                             self.conflicting_action2 = .{ .reduce = production };
-                            self.conflicting_lookahead = terminal;
+                            self.conflicting_lookahead = @intCast(terminal);
                             return ConflictError.LrConflict;
                         }
                     } else {
@@ -1281,7 +1282,7 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
             // `state` can be anything (shifting on EOI = accept)
             return self.shift(allocator, self.symbol_spec.terminals.eoi, 0);
         }
-        pub fn writeActionMethod(self: @This(), emitter: ZigEmitter, allocator: std.mem.Allocator) std.Io.Writer.Error!void {
+        pub fn writeActionMethod(self: *@This(), emitter: ZigEmitter, allocator: std.mem.Allocator) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
             try self.potentialEndOfPreviousRow(allocator);
             try actionTableToActionMethod(self.symbol_spec, self.productions, self.action_table, emitter);
         }

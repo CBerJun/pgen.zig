@@ -89,7 +89,7 @@ pub const Driver = struct {
         // Prepare diagnostic aggregator
         var aggregator: pgen_core.diagnostic.Aggregator = .withLogging(self.allocator);
         defer aggregator.deinit();
-        var cfg_managed, var symbol_spec, var sym_diagnostic = blk: {
+        var cfg_managed, var symbol_spec, var sym_diagnostic, var conflict_resolver = blk: {
             var cst = try self.goCst(&aggregator);
             defer cst.deinit(self.allocator);
             var ast = cst2ast.EbnfManaged.fromCst(cst, self.allocator, self.allocator, &aggregator) catch |err| return switch (err) {
@@ -101,19 +101,22 @@ pub const Driver = struct {
             };
             defer ast.deinit();
             var sym_diagnostic = ast.ownedSymDiagnostic();
+            var conflict_resolver = ast.ownedConflictResolver();
             const cfg_managed = try pgen_core.ast2cfg.CfgManaged.fromAst(
                 ast.symbol_spec,
                 ast.productions,
                 &sym_diagnostic,
+                &conflict_resolver,
                 &ast.pool,
                 self.allocator,
                 self.allocator,
             );
             // We must retain symbol_spec because CFG's is derived from the AST's.
-            break :blk .{ cfg_managed, ast.ownedSymbolSpec(), sym_diagnostic };
+            break :blk .{ cfg_managed, ast.ownedSymbolSpec(), sym_diagnostic, conflict_resolver };
         };
         defer symbol_spec.deinit(self.allocator);
         defer sym_diagnostic.deinit();
+        defer conflict_resolver.deinit();
         defer cfg_managed.deinit();
 
         if (self.config.dump_cfg)
@@ -141,12 +144,12 @@ pub const Driver = struct {
                 } else blk: {
                     const follow_set = try ds.getFollowSet();
                     break :blk pgen_core.backends.SlrBackend(
-                        pgen_core.backends.SwitchActionHandler(void),
+                        pgen_core.backends.SwitchActionHandler(@TypeOf(conflict_resolver)),
                         pgen_core.backends.SwitchGotoHandler,
                     ){
                         .emitter = zig_emitter,
                         .follow_sets = &follow_set,
-                        .conflict_resolver = {},
+                        .conflict_resolver = conflict_resolver,
                         .goto_handler = .{},
                     };
                 };
@@ -162,7 +165,12 @@ pub const Driver = struct {
                     self.config.dump_states,
                 ) catch |err| return switch (err) {
                     error.LrConflict => blk: {
-                        try self.stderr.writeAll("table gen conflict: grammar is ambiguous or not compatible with the selected algorithm\n");
+                        // TODO: suggest the priority/precedence declarations
+                        try self.stderr.writeAll(
+                            \\table gen conflict: grammar is ambiguous or not compatible with the selected algorithm
+                            \\you might be able to resolve conflicts caused by ambiguous grammar using precedence or priority declaration
+                            \\
+                        );
                         // Both LR(0) and SLR backends have `conflict_report`.
                         const cr = backend.conflict_report.?;
                         try explain.conflict(

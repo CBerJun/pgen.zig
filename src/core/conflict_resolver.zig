@@ -197,10 +197,36 @@ pub const GraphScanRRResolver = struct {
     }
 };
 
+/// Since ast2cfg relabels nonterminals as part of optimization, `Resolver`
+/// may keep this as a "filter" on the upcoming queries.
+pub const NtRelabeling = struct {
+    // The semantic is as follows:
+    // Say incoming nt is u, then the relabelled nt is:
+    // - if u < base, then u
+    // - if u >= base, then u - psa[u-base]
+    // `psa.len + base` must be equal to total nonterminal count.
+    base: u32,
+    /// Owned
+    psa: []u32,
+
+    pub fn map(self: @This(), nt: u32) u32 {
+        return nt - (if (nt < self.base) 0 else self.psa[nt - self.base]);
+    }
+
+    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.psa);
+    }
+};
+
 /// The final conflict resolver interface
 pub const Resolver = struct {
+    // All fields are owned
     sr: ShiftReduceMap,
     rr: GraphScanRRResolver, // May become a generic type in the future
+    relabeling: ?NtRelabeling,
+    /// This is the allocator used for potential labelling; `sr` and `rr` can
+    /// have separate ones.
+    relabeling_allocator: std.mem.Allocator,
 
     /// Temp allocation is needed during graph traversal.
     pub const Error = std.mem.Allocator.Error;
@@ -208,14 +234,25 @@ pub const Resolver = struct {
     pub fn deinit(self: *@This()) void {
         self.sr.deinit();
         self.rr.deinit();
+        if (self.relabeling) |r| {
+            r.deinit(self.relabeling_allocator);
+        }
         self.* = undefined;
     }
 
-    fn resolveShiftReduce(self: *@This(), terminal: u32, nonterminal: u32) Error!?ShiftReduceDecision {
-        const key: ShiftReduceKey = .{ .nt = nonterminal, .t = terminal };
+    /// Potentially relabelled nt
+    fn nt(self: @This(), x: u32) u32 {
+        if (self.relabeling) |r| {
+            return r.map(x);
+        }
+        return x;
+    }
+
+    pub fn resolveShiftReduce(self: *@This(), terminal: u32, nonterminal: u32) Error!?ShiftReduceDecision {
+        const key: ShiftReduceKey = .{ .nt = self.nt(nonterminal), .t = terminal };
         return self.sr.get(key);
     }
-    fn resolveReduceReduce(self: *@This(), nonterminals: [2]u32) Error!?u1 {
-        return self.rr.query(nonterminals[0], nonterminals[1]);
+    pub fn resolveReduceReduce(self: *@This(), nonterminals: [2]u32) Error!?u1 {
+        return self.rr.query(self.nt(nonterminals[0]), self.nt(nonterminals[1]));
     }
 };

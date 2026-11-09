@@ -35,6 +35,7 @@ const cfg = @import("./cfg.zig");
 const ast = @import("./ast.zig");
 const sym = @import("./sym.zig");
 const diagnostic = @import("./diagnostic.zig");
+const cr = @import("./conflict_resolver.zig");
 
 /// Managed CFG form with an arena allocator owning all memory of `productions`.
 /// The `symbol_spec` is *derived* from the given symbol spec and is considered
@@ -46,15 +47,15 @@ pub const CfgManaged = struct {
     /// Owner of `arena`.
     allocator: std.mem.Allocator,
 
-    /// `sym_diagnostic` is modified *in place* if given.
-    pub fn fromAst(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, sym_diagnostic: ?*sym.DiagnosticInfo, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
+    /// `sym_diagnostic` and `conflict_resolver` are modified *in place* if given.
+    pub fn fromAst(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, sym_diagnostic: ?*sym.DiagnosticInfo, conflict_resolver: ?*cr.Resolver, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
         var arena = try allocator.create(std.heap.ArenaAllocator);
         arena.* = .init(allocator);
         errdefer {
             arena.deinit();
             allocator.destroy(arena);
         }
-        const new_symbol_spec, const cfg_productions = try astToCfg(symbol_spec, productions, sym_diagnostic, pool, arena.allocator(), scrap_allocator);
+        const new_symbol_spec, const cfg_productions = try astToCfg(symbol_spec, productions, sym_diagnostic, conflict_resolver, pool, arena.allocator(), scrap_allocator);
         return .{
             .symbol_spec = new_symbol_spec,
             .productions = cfg_productions,
@@ -75,6 +76,7 @@ const AstToCfg = struct {
     symbol_spec: sym.SymbolSpec,
     productions: ast.EbnfProductions,
     sym_diagnostic: ?*sym.DiagnosticInfo,
+    conflict_resolver: ?*cr.Resolver,
     pool: *ast.ExprPool,
 
     allocator: std.mem.Allocator,
@@ -97,11 +99,12 @@ const AstToCfg = struct {
         target: u32,
     };
 
-    pub fn init(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, sym_diagnostic: ?*sym.DiagnosticInfo, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) @This() {
+    pub fn init(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, sym_diagnostic: ?*sym.DiagnosticInfo, conflict_resolver: ?*cr.Resolver, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) @This() {
         return .{
             .symbol_spec = symbol_spec,
             .productions = productions,
             .sym_diagnostic = sym_diagnostic,
+            .conflict_resolver = conflict_resolver,
             .pool = pool,
             .allocator = allocator,
             .scrap_allocator = scrap_allocator,
@@ -556,7 +559,8 @@ const AstToCfg = struct {
         // For nts, we can't delete node forming ones because they are named
         // and always part of the generated `Nonterminal` enum. We could delete
         // non node forming ones but that would require relabelling nts.
-        // If we relabel nts, we'll need to also update `sym_diagnostic`.
+        // If we relabel nts, we'll need to also update `sym_diagnostic` and
+        // `conflict_resolver`.
         nt_deletion: {
             const node_forming_cnt = self.symbol_spec.nonterminals.node_forming_count;
             const non_node_forming_cnt = self.aux_nt - node_forming_cnt;
@@ -564,9 +568,12 @@ const AstToCfg = struct {
                 break :nt_deletion;
             // Each nt is relabelled by subtracting its ID by the number of
             // unproductive nts that have an ID less than it. We can precompute
-            // that (build a prefix sum array).
-            var psa = try self.scrap_allocator.alloc(u32, non_node_forming_cnt);
-            defer self.scrap_allocator.free(psa);
+            // that (build a prefix sum array). The `conflict_resolver` may need
+            // to retain it.
+            const psa_allocator = if (self.conflict_resolver) |x| x.relabeling_allocator else self.scrap_allocator;
+            var psa = try psa_allocator.alloc(u32, non_node_forming_cnt);
+            var psa_owned = true;
+            defer if (psa_owned) psa_allocator.free(psa);
             @memset(psa, 0);
             {
                 var it = reachable.iterator(.{
@@ -631,6 +638,14 @@ const AstToCfg = struct {
                 }
                 sd.nodeless_nt_names = try sd.allocator.realloc(sd.nodeless_nt_names, n - n_user_deleted);
             }
+            // Update `conflict_resolver`
+            // For this we won't modify all occurrences since it might expensive
+            // (need to remake the hashmap).
+            // Simplest solution: We'll just keep the `psa` with conflict resolver.
+            if (self.conflict_resolver) |cr_resolver| {
+                cr_resolver.relabeling = .{ .base = node_forming_cnt, .psa = psa };
+                psa_owned = false; // ownership transferred
+            }
         }
     }
 };
@@ -665,9 +680,9 @@ const ProductionsManager = struct {
 };
 
 /// This mutates states in the `pool`'s entries, so it is not safe for
-/// concurrent use. Mutates `sym_diagnostic` in place.
-pub fn astToCfg(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, sym_diagnostic: ?*sym.DiagnosticInfo, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { sym.SymbolSpec, cfg.CfgProductions } {
-    var ast2cfg: AstToCfg = .init(symbol_spec, productions, sym_diagnostic, pool, allocator, scrap_allocator);
+/// concurrent use. Mutates `sym_diagnostic`/`conflict_resolver` in place.
+pub fn astToCfg(symbol_spec: sym.SymbolSpec, productions: ast.EbnfProductions, sym_diagnostic: ?*sym.DiagnosticInfo, conflict_resolver: ?*cr.Resolver, pool: *ast.ExprPool, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { sym.SymbolSpec, cfg.CfgProductions } {
+    var ast2cfg: AstToCfg = .init(symbol_spec, productions, sym_diagnostic, conflict_resolver, pool, allocator, scrap_allocator);
     defer ast2cfg.deinit();
     try ast2cfg.pass1();
     try ast2cfg.pass2();
