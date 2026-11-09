@@ -6,7 +6,6 @@
 
 const std = @import("std");
 const digraph = @import("./digraph.zig");
-const diagnostic = @import("./diagnostic.zig");
 
 /// A shift-reduce conflict resolver entry, nonterminal (lhs of reduce) + terminal
 pub const ShiftReduceKey = struct {
@@ -26,25 +25,23 @@ pub const ShiftReduceHashContext = struct {
 
 pub const ShiftReduceDecision = enum { shift, reduce };
 
-/// Represents a semantically invalid conflict resolution configuration
-/// (e.g. both shift and reduce specified for a single shift-reduce key)
-pub const CRError = error{
-    InvalidConflictResolveRule,
-};
-
 /// Map that can be queried to resolve shift-reduce conflicts
 pub const ShiftReduceMap = std.HashMap(ShiftReduceKey, ShiftReduceDecision, ShiftReduceHashContext, std.hash_map.default_max_load_percentage);
 
 pub const ShiftReduceBuilder = struct {
-    aggregator: *diagnostic.Aggregator,
     allocator: std.mem.Allocator,
     map: ShiftReduceMap,
     /// If `map` has been `retrieve`d.
     map_transferred: bool,
 
-    pub fn init(aggregator: *diagnostic.Aggregator, allocator: std.mem.Allocator) @This() {
+    /// Represents a semantically invalid conflict resolution configuration
+    pub const Error = error{
+        /// A duplicate (nonterminal, terminal) pair
+        DuplicatePair,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) @This() {
         return .{
-            .aggregator = aggregator,
             .allocator = allocator,
             .map = .init(allocator),
             .map_transferred = false,
@@ -65,15 +62,14 @@ pub const ShiftReduceBuilder = struct {
         self.* = undefined;
     }
 
-    pub fn addRule(self: *@This(), nt: u32, t: u32, rel: ShiftReduceDecision) (CRError || std.mem.Allocator.Error)!void {
+    pub fn addRule(self: *@This(), nt: u32, t: u32, rel: ShiftReduceDecision) (Error || std.mem.Allocator.Error)!void {
         const key: ShiftReduceKey = .{ .nt = nt, .t = t };
         const gop = try self.map.getOrPut(key);
         if (gop.found_existing) {
             // It doesn't make sense to have duplicates even if the old `rel`
-            // matches with the new.
-            // TODO: better message (with nt and t)
-            self.aggregator.add(.fatal, "precedence relation for this pair is already declared", .{});
-            return CRError.InvalidConflictResolveRule;
+            // matches with the new, since each rule has its own single
+            // statement (ending in semicolon).
+            return Error.DuplicatePair;
         }
         gop.value_ptr.* = rel;
     }
@@ -86,18 +82,16 @@ pub const ShiftReduceBuilder = struct {
 /// Since we don't anticipate frequent queries, for now we just use the naive
 /// algorithm with no preprocessing, O(V+E) time per query.
 pub const ReduceReduceBuilder = struct {
-    aggregator: *diagnostic.Aggregator,
     allocator: std.mem.Allocator,
     /// Adjacency of graph in which there is an edge u -> v iff u > v.
     succ: []std.ArrayList(u32),
     /// If `retrieve` has been called
     retrieved: bool,
 
-    pub fn init(num_nt: u32, aggregator: *diagnostic.Aggregator, allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
+    pub fn init(num_nt: u32, allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
         const succ = try allocator.alloc(std.ArrayList(u32), num_nt);
         @memset(succ, .empty);
         return .{
-            .aggregator = aggregator,
             .allocator = allocator,
             .succ = succ,
             .retrieved = false,
@@ -114,10 +108,10 @@ pub const ReduceReduceBuilder = struct {
         self.* = undefined;
     }
 
-    pub fn addGreaterThan(self: *@This(), lhs: u32, rhs: u32) (CRError || std.mem.Allocator.Error)!void {
+    /// Return `IdenticalOperands` if `lhs == rhs`.
+    pub fn addGreaterThan(self: *@This(), lhs: u32, rhs: u32) (error{IdenticalOperands} || std.mem.Allocator.Error)!void {
         if (lhs == rhs) {
-            self.aggregator.add(.fatal, "priority operands must be distinct", .{});
-            return CRError.InvalidConflictResolveRule;
+            return error.IdenticalOperands;
         }
         // We could allow duplicate declarations (as long as they're consistent)
         // because there is use case like:
@@ -127,7 +121,9 @@ pub const ReduceReduceBuilder = struct {
         try self.succ[lhs].append(self.allocator, rhs);
     }
 
-    pub fn retrieve(self: *@This()) (CRError || std.mem.Allocator.Error)!GraphScanRRResolver {
+    /// Return `InconsistentRank` if rank between nonterminals is inconsistent
+    /// e.g. a>b; b>c; c>a.
+    pub fn retrieve(self: *@This()) (error{InconsistentRank} || std.mem.Allocator.Error)!GraphScanRRResolver {
         // Use `empty` not `withSize` so that on error cleanup works correctly
         var graph = try digraph.Digraph.empty(@intCast(self.succ.len), self.allocator);
         errdefer graph.free(self.allocator);
@@ -143,8 +139,7 @@ pub const ReduceReduceBuilder = struct {
         defer self.allocator.free(top_order);
         if ((try graph.topologicalSort(self.allocator, top_order.ptr)) < graph.n) {
             // Cycle detected
-            self.aggregator.add(.fatal, "inconsistent priority section (a nonterminal is both < and > another)", .{});
-            return CRError.InvalidConflictResolveRule;
+            return error.InconsistentRank;
         }
         return GraphScanRRResolver.init(graph, top_order.ptr, self.allocator);
     }

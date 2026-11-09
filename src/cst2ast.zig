@@ -5,7 +5,7 @@ const ast = pgen_core.ast;
 const sym = pgen_core.sym;
 const diagnostic = pgen_core.diagnostic;
 const cr = pgen_core.conflict_resolver;
-const formatStringToken = @import("./tokenizer.zig").formatStringToken;
+const tokenizer = @import("./tokenizer.zig");
 
 /// Managed `ast.Ebnf` with arena allocators and `ExprPool` which holds
 /// the rhs EBNF nodes. This won't work if you have multiple `ast.Ebnf`s
@@ -224,16 +224,17 @@ pub fn cstToEbnf(
     var precedence_state: ?psr.NtChildrenIterator.State = null;
     var priority_state: ?psr.NtChildrenIterator.State = null;
     while (grammar_it.peek().?.* == .leaf) {
+        const state = grammar_it.saveState();
         switch (grammar_it.eatToken().tag) {
             .@"k.precedence" => {
                 grammar_it.eatToken().assertTag(.@".{");
-                precedence_state = grammar_it.saveState();
+                precedence_state = state;
                 // Skip all internal nodes plus one more node (the @".}")
                 while (grammar_it.eat().* == .internal) {}
             },
             .@"k.priority" => {
                 grammar_it.eatToken().assertTag(.@".{");
-                priority_state = grammar_it.saveState();
+                priority_state = state;
                 while (grammar_it.eat().* == .internal) {}
             },
             else => unreachable,
@@ -465,9 +466,11 @@ pub fn cstToEbnf(
 
     // Resolve precedence block
     var cr_sr_map = if (precedence_state) |target_state| precedence_block: {
-        var cr_sr_builder: cr.ShiftReduceBuilder = .init(aggregator, cr_allocator);
+        var cr_sr_builder: cr.ShiftReduceBuilder = .init(cr_allocator);
         defer cr_sr_builder.deinit();
         grammar_it.loadState(target_state);
+        grammar_it.eatToken().assertTag(.@"k.precedence");
+        grammar_it.eatToken().assertTag(.@".{");
         while (true) {
             const node = grammar_it.eat();
             if (node.* == .leaf) {
@@ -507,7 +510,7 @@ pub fn cstToEbnf(
                     var aw: std.Io.Writer.Allocating = .init(scrap_allocator);
                     defer aw.deinit();
                     // Write failed must be due to OOM in allocating writer
-                    formatStringToken(terminal_token.*, &aw.writer) catch return error.OutOfMemory;
+                    tokenizer.formatStringToken(terminal_token.*, &aw.writer) catch return error.OutOfMemory;
                     return fatalAt(
                         aggregator,
                         terminal_token,
@@ -518,7 +521,19 @@ pub fn cstToEbnf(
                 else => unreachable,
             };
             cr_sr_builder.addRule(nt, terminal, rel) catch |err| return switch (err) {
-                error.InvalidConflictResolveRule => SemanticError.Cst2AstSemanticError,
+                error.DuplicatePair => blk: {
+                    var aw: std.Io.Writer.Allocating = .init(scrap_allocator);
+                    defer aw.deinit();
+                    tokenizer.formatWordOrString(terminal_token.*, &aw.writer) catch return error.OutOfMemory;
+                    // Report the error on the relation > or < makes it clear
+                    // which rule we are complaining about
+                    break :blk fatalAt(
+                        aggregator,
+                        rel_token,
+                        "precedence between {s} and {s} already declared",
+                        .{ nt_token.payload.word, aw.written() },
+                    );
+                },
                 else => |e| e,
             };
         }
@@ -530,10 +545,12 @@ pub fn cstToEbnf(
     const cr_rr_resolver = if (priority_state) |target_state| priority_block: {
         // Optimization: empty priority block is same as no priority block
         grammar_it.loadState(target_state);
+        grammar_it.eatToken().assertTag(.@"k.priority");
+        grammar_it.eatToken().assertTag(.@".{");
         if (grammar_it.peek().?.isToken(.@".}")) {
             break :priority_block null;
         }
-        var cr_rr_builder = try cr.ReduceReduceBuilder.init(nonterminal_count, aggregator, cr_allocator);
+        var cr_rr_builder = try cr.ReduceReduceBuilder.init(nonterminal_count, cr_allocator);
         defer cr_rr_builder.deinit();
         while (true) {
             const node = grammar_it.eat();
@@ -576,14 +593,31 @@ pub fn cstToEbnf(
                     .lt => cr_rr_builder.addGreaterThan(rhs, lhs),
                     .gt => cr_rr_builder.addGreaterThan(lhs, rhs),
                 }) catch |err| return switch (err) {
-                    error.InvalidConflictResolveRule => SemanticError.Cst2AstSemanticError,
+                    error.IdenticalOperands => fatalAt(
+                        aggregator,
+                        word,
+                        "identical priority operand '{s}' does not make sense",
+                        .{word.payload.word},
+                    ),
                     else => |e| e,
                 };
                 lhs = rhs; // Current RHS is next relation's LHS
             }
         }
         break :priority_block cr_rr_builder.retrieve() catch |err| return switch (err) {
-            error.InvalidConflictResolveRule => SemanticError.Cst2AstSemanticError,
+            error.InconsistentRank => blk: {
+                // Report error on the keyword 'precedence' to inform user this
+                // is a holistic error on that entire section.
+                grammar_it.loadState(target_state);
+                const priority_token = grammar_it.eatToken();
+                // TODO: which cycle caused the error
+                break :blk fatalAt(
+                    aggregator,
+                    priority_token,
+                    "inconsistent priority section (a nonterminal is both < and > another)",
+                    .{},
+                );
+            },
             else => |e| e,
         };
     } else null;

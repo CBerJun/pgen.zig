@@ -195,13 +195,13 @@ pub const Tokenizer = struct {
     }
 };
 
-/// Display a STRING token.
+/// Display a `STRING` token.
 pub fn formatStringToken(token: psr.Token, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     token.assertTag(.STRING);
     return formatString(token.payload.str.content, token.payload.str.suffix, writer);
 }
 
-/// Display a grammar STRING with content and suffix.
+/// Display a grammar `STRING` with content and suffix.
 pub fn formatString(content: []const u8, suffix: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writer.writeByte('"');
     for (content) |ch| {
@@ -212,4 +212,13 @@ pub fn formatString(content: []const u8, suffix: []const u8, writer: *std.Io.Wri
     }
     try writer.writeByte('"');
     try writer.writeAll(suffix);
+}
+
+/// Display a `WORD` or `STRING` token.
+pub fn formatWordOrString(token: psr.Token, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    return switch (token.tag) {
+        .WORD => writer.writeAll(token.payload.word),
+        .STRING => formatStringToken(token, writer),
+        else => unreachable,
+    };
 }
