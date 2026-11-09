@@ -24,8 +24,7 @@ factor:
     | "(" expression ")"  # An expression in parentheses is a single factor
     | "sin" "(" expression ")"  # We can add sin() function too
     | "sin" number  # We can allow omitting parentheses when a number follows too
-    ;
-    </pre>
+    ;</pre>
     <p>You can also try to play with pgen.zig's own grammar for specifying grammar (the "meta grammar"); pgen.zig uses itself to generate its parser!:</p>
     <pre>
 tokens {
@@ -58,8 +57,7 @@ rhs_term: rhs_atom ["*" | "+"];
 rhs_factor:
     rhs_term+
     | "epsilon"k;
-rhs: rhs_factor ("|" rhs_factor)*;
-    </pre>
+rhs: rhs_factor ("|" rhs_factor)*;</pre>
     <p>Try to mess around with the grammar and see how the program detects a problem in the grammar (e.g. undeclared name).</p>
     <p>The following grammar, for instance, is ambiguous (the famous <a href="https://en.wikipedia.org/wiki/Dangling_else">dangling else</a> problem), so pgen.zig will give you an error:</p>
     <pre>
@@ -78,14 +76,12 @@ expr: term (("+" | "-") term)*;
 term: factor (("*" | "/") factor)*;
 factor: NUMBER | "(" expr ")";
 # Should the else prong belong to the first "if" or the second "if" in
-# `if 1 then if 2 then print 3 else print 4`?
-    </pre>
+# `if 1 then if 2 then print 3 else print 4`?</pre>
     <p>Now try to explicitly tell pgen.zig to attach the else prong to closest if, by adding the following lines after the "entry" declaration (in technical terms, you're telling pgen.zig to prefer shifting "else" over reducing optional_else to nothing).</p>
     <pre>
 precedence {
     optional_else &lt; "else"kw;
-}
-    </pre>
+}</pre>
     <div id="app">
         <p>Input grammar:</p>
         <textarea id="input-source"></textarea>

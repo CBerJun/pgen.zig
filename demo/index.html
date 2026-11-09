@@ -23,8 +23,7 @@ term       = factor, { "*", factor } ;
 factor     = number | "(", expression, ")" ;
 number     = digit, { digit } ;
 digit      = "0" | "1" | "2" | "3" | "4"
-           | "5" | "6" | "7" | "8" | "9" ;
-    </pre>
+           | "5" | "6" | "7" | "8" | "9" ;</pre>
     <p>Here, quoted text represents literal characters, | means "or," commas join items in sequence, and braces mean "repeat zero or more times." Isn't it like a more powerful version of regular expressions?</p>
     <p>This grammar accepts <span class="code">2 + 3 * 4</span> and <span class="code">(2 + 3) * 4</span>, but rejects <span class="code">2 + * 3</span>. Its structure also places multiplication inside addition's operands, expressing that multiplication takes priority. Parentheses allow an entire expression to act as one factor.</p>
     <p>Your application can then use the parsed structure to calculate a result: 14 for the first expression and 20 for the second. Parsing establishes the structure; your code supplies its meaning. The same separation is useful for interpreting commands, reading structured data, and implementing programming languages.</p>
