@@ -94,14 +94,18 @@ tokens {
 entry entry_nonterminal;
 
 precedence {
-    # Optional block used to resolve shift-reduce conflicts (WIP!!)
+    # Optional block used to resolve shift-reduce conflicts
+    # Prefer reducing with nonterminal1 over shifting terminal1
     nonterminal1 > terminal1;
     nonterminal2 < terminal2;
 }
 
 priority {
-    # Optional block used to resolve reduce-reduce conflicts (WIP!!)
+    # Optional block used to resolve reduce-reduce conflicts
+    # Reducing with nonterminal1 has highest priority
     nonterminal1 > nonterminal2 > nonterminal3;
+    # Reducing with other_nonterminal1 is indirectly less preferred than
+    # nonterminal1.
     other_nonterminal1 < nonterminal2;
 }
 
