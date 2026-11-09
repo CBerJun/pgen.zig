@@ -26,7 +26,7 @@ grammar:
 token_decl: (WORD | STRING) ";";
 
 # Nonterminal > or < terminal
-precedence_decl: WORD (">" | "<") (WORD | STRING);
+precedence_decl: WORD (">" | "<") (WORD | STRING) ";";
 # Chained nonterminal relation
 priority_decl: WORD ((">" WORD)+ | ("<" WORD)+) ";";
 

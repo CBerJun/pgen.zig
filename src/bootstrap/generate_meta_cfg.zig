@@ -262,7 +262,7 @@ fn buildProductions(pm: *ProductionManager, aux_manager: *AuxNtManager) !void {
 
     const lt_or_gt = try aux_manager.newAux();
     const word_or_string = try aux_manager.newAux();
-    try pm.prod(.precedence_decl, .{ Terminal.WORD, lt_or_gt, word_or_string });
+    try pm.prod(.precedence_decl, .{ Terminal.WORD, lt_or_gt, word_or_string, Sym.@";" });
     try pm.prod(lt_or_gt, .{Sym.@"<"});
     try pm.prod(lt_or_gt, .{Sym.@">"});
     try pm.prod(word_or_string, .{Terminal.WORD});
