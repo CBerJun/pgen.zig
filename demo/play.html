@@ -41,9 +41,17 @@ grammar:
         token_decl+
     "}"
     "entry"k WORD ";"
+    ["precedence"k "{" precedence_decl* "}"]
+    ["priority"k "{" priority_decl* "}"]
     production+;
 # String must be empty in token_decl but no way to enforce that
 token_decl: (WORD | STRING) ";";
+
+# Nonterminal &gt; or &lt; terminal
+precedence_decl: WORD ("&gt;" | "&lt;") (WORD | STRING) ";";
+# Chained nonterminal relation
+priority_decl: WORD (("&gt;" WORD)+ | ("&lt;" WORD)+) ";";
+
 production: nonterminal_qualifier WORD ":" rhs ";";
 nonterminal_qualifier: ["nodeless"k];
 
