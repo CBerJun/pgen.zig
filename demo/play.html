@@ -70,13 +70,21 @@ tokens {
 }
 entry stmt;
 stmt: "print"kw expr ";"
-    | "if"kw expr "then"kw stmt ["else"kw stmt]  # Optional else prong (ambiguous!)
+    | if_stmt
     | "{" stmt* "}";
+if_stmt: "if"kw expr "then"kw stmt optional_else;
+optional_else: ["else"kw stmt];  # Optional else prong (ambiguous!)
 expr: term (("+" | "-") term)*;
 term: factor (("*" | "/") factor)*;
 factor: NUMBER | "(" expr ")";
 # Should the else prong belong to the first "if" or the second "if" in
 # `if 1 then if 2 then print 3 else print 4`?
+    </pre>
+    <p>Now try to explicitly tell pgen.zig to attach the else prong to closest if, by adding the following lines after the "entry" declaration (in technical terms, you're telling pgen.zig to prefer shifting "else" over reducing optional_else to nothing).</p>
+    <pre>
+precedence {
+    optional_else &lt; "else"kw;
+}
     </pre>
     <div id="app">
         <p>Input grammar:</p>
