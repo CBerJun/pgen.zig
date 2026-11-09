@@ -801,6 +801,11 @@ fn actionTableToActionMethod(symbol_spec: *const sym.SymbolSpec, productions: *c
             try emitter.out.writeAll(", ");
         }
         for (action_row.reduces.items) |reduce_group| {
+            // Lookahead set may become empty due to conflict resolution
+            // Cannot write empty list as switch case.
+            if (reduce_group.lookaheads.len == 0) {
+                continue;
+            }
             // The benefit of grouping reduce actions :)
             for (reduce_group.lookaheads) |terminal| {
                 try emitter.out.print("{},", .{terminal});
