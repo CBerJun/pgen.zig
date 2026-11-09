@@ -89,7 +89,7 @@ pub const Driver = struct {
         // Prepare diagnostic aggregator
         var aggregator: pgen_core.diagnostic.Aggregator = .withLogging(self.allocator);
         defer aggregator.deinit();
-        var cfg_managed, var symbol_spec, var sym_diagnostic, var conflict_resolver = blk: {
+        var cfg_managed, var symbol_spec, var sym_diagnostic, const conflict_resolver = blk: {
             var cst = try self.goCst(&aggregator);
             defer cst.deinit(self.allocator);
             var ast = cst2ast.EbnfManaged.fromCst(cst, self.allocator, self.allocator, &aggregator) catch |err| return switch (err) {
@@ -101,22 +101,33 @@ pub const Driver = struct {
             };
             defer ast.deinit();
             var sym_diagnostic = ast.ownedSymDiagnostic();
-            var conflict_resolver = ast.ownedConflictResolver();
+            const conflict_resolver = ast.ownedConflictResolver();
+            var conflict_resolver_var: pgen_core.conflict_resolver.Resolver = if (conflict_resolver) |x| x else undefined;
             const cfg_managed = try pgen_core.ast2cfg.CfgManaged.fromAst(
                 ast.symbol_spec,
                 ast.productions,
                 &sym_diagnostic,
-                &conflict_resolver,
+                if (conflict_resolver) |_| &conflict_resolver_var else null,
                 &ast.pool,
                 self.allocator,
                 self.allocator,
             );
             // We must retain symbol_spec because CFG's is derived from the AST's.
-            break :blk .{ cfg_managed, ast.ownedSymbolSpec(), sym_diagnostic, conflict_resolver };
+            break :blk .{
+                cfg_managed,
+                ast.ownedSymbolSpec(),
+                sym_diagnostic,
+                if (conflict_resolver) |_| conflict_resolver_var else null,
+            };
         };
         defer symbol_spec.deinit(self.allocator);
         defer sym_diagnostic.deinit();
-        defer conflict_resolver.deinit();
+        defer {
+            if (conflict_resolver) |c| {
+                var conflict_resolver_var = c;
+                conflict_resolver_var.deinit();
+            }
+        }
         defer cfg_managed.deinit();
 
         if (self.config.dump_cfg)
@@ -136,56 +147,67 @@ pub const Driver = struct {
             .cst_owns_token = self.config.cst_owns_token,
             // TODO: node_count_bits support
         };
+        const has_cr_runtime = conflict_resolver != null;
         switch (self.config.algorithm) {
             // Trick to force `algo` to be comptime available.
-            inline else => |algo| {
-                var backend = if (algo == .lr0) pgen_core.backends.Lr0SwitchBackend{
-                    .emitter = zig_emitter,
-                } else blk: {
-                    const follow_set = try ds.getFollowSet();
-                    break :blk pgen_core.backends.SlrBackend(
-                        pgen_core.backends.SwitchActionHandler(@TypeOf(conflict_resolver)),
-                        pgen_core.backends.SwitchGotoHandler,
-                    ){
-                        .emitter = zig_emitter,
-                        .follow_sets = &follow_set,
-                        .conflict_resolver = conflict_resolver,
-                        .goto_handler = .{},
-                    };
-                };
-                defer backend.free();
-                pgen_core.lr0.lr0(
-                    cfg_managed.symbol_spec,
-                    cfg_managed.productions,
-                    tarjan,
-                    first_reachability,
-                    @TypeOf(backend),
-                    &backend,
-                    self.allocator,
-                    self.config.dump_states,
-                ) catch |err| return switch (err) {
-                    error.LrConflict => blk: {
-                        // TODO: suggest the priority/precedence declarations
-                        try self.stderr.writeAll(
-                            \\table gen conflict: grammar is ambiguous or not compatible with the selected algorithm
-                            \\you might be able to resolve conflicts caused by ambiguous grammar using precedence or priority declaration
-                            \\
-                        );
-                        // Both LR(0) and SLR backends have `conflict_report`.
-                        const cr = backend.conflict_report.?;
-                        try explain.conflict(
-                            self.allocator,
-                            pgen_core.lr0.Item,
-                            self.stderr,
+            inline else => |algo| outer: {
+                if (algo == .lr0 and has_cr_runtime) {
+                    try self.stderr.writeAll("LR(0) currently does not support conflict resolution\n");
+                    return error.GrammarError;
+                }
+                switch (has_cr_runtime) {
+                    // Well, the trick again.
+                    inline else => |has_cr| break :outer {
+                        const cr_passed = if (has_cr) conflict_resolver.? else {};
+                        var backend = if (algo == .lr0) pgen_core.backends.Lr0SwitchBackend{
+                            .emitter = zig_emitter,
+                        } else blk: {
+                            const follow_set = try ds.getFollowSet();
+                            break :blk pgen_core.backends.SlrBackend(
+                                pgen_core.backends.SwitchActionHandler(@TypeOf(cr_passed)),
+                                pgen_core.backends.SwitchGotoHandler,
+                            ){
+                                .emitter = zig_emitter,
+                                .follow_sets = &follow_set,
+                                .goto_handler = .{},
+                                .conflict_resolver = cr_passed,
+                            };
+                        };
+                        defer backend.free();
+                        pgen_core.lr0.lr0(
                             cfg_managed.symbol_spec,
                             cfg_managed.productions,
-                            sym_diagnostic,
-                            cr,
-                        );
-                        break :blk error.GrammarError;
+                            tarjan,
+                            first_reachability,
+                            @TypeOf(backend),
+                            &backend,
+                            self.allocator,
+                            self.config.dump_states,
+                        ) catch |err| return switch (err) {
+                            error.LrConflict => blk: {
+                                // TODO: suggest the priority/precedence declarations
+                                try self.stderr.writeAll(
+                                    \\table gen conflict: grammar is ambiguous or not compatible with the selected algorithm
+                                    \\you might be able to resolve conflicts caused by ambiguous grammar using precedence or priority declaration
+                                    \\
+                                );
+                                // Both LR(0) and SLR backends have `conflict_report`.
+                                const cr = backend.conflict_report.?;
+                                try explain.conflict(
+                                    self.allocator,
+                                    pgen_core.lr0.Item,
+                                    self.stderr,
+                                    cfg_managed.symbol_spec,
+                                    cfg_managed.productions,
+                                    sym_diagnostic,
+                                    cr,
+                                );
+                                break :blk error.GrammarError;
+                            },
+                            else => |e| e,
+                        };
                     },
-                    else => |e| e,
-                };
+                }
             },
         }
         try self.output.flush();

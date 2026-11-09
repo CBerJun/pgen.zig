@@ -222,7 +222,8 @@ pub const NtRelabeling = struct {
 pub const Resolver = struct {
     // All fields are owned
     sr: ShiftReduceMap,
-    rr: GraphScanRRResolver, // May become a generic type in the future
+    /// null means no reduce-reduce rule available
+    rr: ?GraphScanRRResolver, // May become a generic type in the future
     relabeling: ?NtRelabeling,
     /// This is the allocator used for potential labelling; `sr` and `rr` can
     /// have separate ones.
@@ -233,7 +234,10 @@ pub const Resolver = struct {
 
     pub fn deinit(self: *@This()) void {
         self.sr.deinit();
-        self.rr.deinit();
+        if (self.rr) |rr| {
+            var rr_var = rr;
+            rr_var.deinit();
+        }
         if (self.relabeling) |r| {
             r.deinit(self.relabeling_allocator);
         }
@@ -253,6 +257,8 @@ pub const Resolver = struct {
         return self.sr.get(key);
     }
     pub fn resolveReduceReduce(self: *@This(), nonterminals: [2]u32) Error!?u1 {
-        return self.rr.query(self.nt(nonterminals[0]), self.nt(nonterminals[1]));
+        if (self.rr) |rr|
+            return rr.query(self.nt(nonterminals[0]), self.nt(nonterminals[1]));
+        return null;
     }
 };

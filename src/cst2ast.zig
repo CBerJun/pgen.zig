@@ -103,10 +103,14 @@ pub const EbnfManaged = struct {
         return self.sym_diagnostic.?;
     }
 
-    /// Transfer `cr_resolver`'s ownership
-    pub fn ownedConflictResolver(self: *@This()) cr.Resolver {
-        defer self.cr_resolver = null;
-        return self.cr_resolver.?;
+    /// Transfer `cr_resolver`'s ownership; no resolver means the grammar didn't
+    /// define any conflict resolution rules.
+    pub fn ownedConflictResolver(self: *@This()) ?cr.Resolver {
+        if (self.cr_resolver) |x| {
+            self.cr_resolver = null;
+            return x;
+        }
+        return null;
     }
 
     pub fn deinit(self: *@This()) void {
@@ -148,7 +152,7 @@ pub fn cstToEbnf(
     cr_allocator: std.mem.Allocator,
     scrap_allocator: std.mem.Allocator,
     aggregator: *diagnostic.Aggregator,
-) (SemanticError || std.mem.Allocator.Error)!struct { sym.SymbolSpec, ast.EbnfProductions, sym.DiagnosticInfo, cr.Resolver } {
+) (SemanticError || std.mem.Allocator.Error)!struct { sym.SymbolSpec, ast.EbnfProductions, sym.DiagnosticInfo, ?cr.Resolver } {
     // Pass 1: Collect terminals and nonterminals
     var named_terminals_map: std.StringHashMapUnmanaged(u32) = .empty;
     defer named_terminals_map.deinit(scrap_allocator); // Strings are borrowed
@@ -458,10 +462,10 @@ pub fn cstToEbnf(
         .nonterminals_map = &nonterminals_map,
     };
 
-    var cr_sr_builder: cr.ShiftReduceBuilder = .init(aggregator, cr_allocator);
-    defer cr_sr_builder.deinit();
     // Resolve precedence block
-    if (precedence_state) |target_state| {
+    var cr_sr_map = if (precedence_state) |target_state| precedence_block: {
+        var cr_sr_builder: cr.ShiftReduceBuilder = .init(aggregator, cr_allocator);
+        defer cr_sr_builder.deinit();
         grammar_it.loadState(target_state);
         while (true) {
             const node = grammar_it.eat();
@@ -512,15 +516,19 @@ pub fn cstToEbnf(
                 else => |e| e,
             };
         }
-    }
-    var cr_sr_map = cr_sr_builder.retrieve();
+        break :precedence_block cr_sr_builder.retrieve();
+    } else cr.ShiftReduceMap.init(cr_allocator);
     errdefer cr_sr_map.deinit();
 
-    var cr_rr_builder = try cr.ReduceReduceBuilder.init(nonterminal_count, aggregator, cr_allocator);
-    defer cr_rr_builder.deinit();
     // Resolve priority block
-    if (priority_state) |target_state| {
+    const cr_rr_resolver = if (priority_state) |target_state| priority_block: {
+        // Optimization: empty priority block is same as no priority block
         grammar_it.loadState(target_state);
+        if (grammar_it.peek().?.isToken(.@".}")) {
+            break :priority_block null;
+        }
+        var cr_rr_builder = try cr.ReduceReduceBuilder.init(nonterminal_count, aggregator, cr_allocator);
+        defer cr_rr_builder.deinit();
         while (true) {
             const node = grammar_it.eat();
             if (node.* == .leaf) {
@@ -568,12 +576,17 @@ pub fn cstToEbnf(
                 lhs = rhs; // Current RHS is next relation's LHS
             }
         }
+        break :priority_block cr_rr_builder.retrieve() catch |err| return switch (err) {
+            error.InvalidConflictResolveRule => SemanticError.Cst2AstSemanticError,
+            else => |e| e,
+        };
+    } else null;
+    errdefer {
+        if (cr_rr_resolver) |x| {
+            var x_var = x;
+            x_var.deinit();
+        }
     }
-    var cr_rr_resolver = cr_rr_builder.retrieve() catch |err| return switch (err) {
-        error.InvalidConflictResolveRule => SemanticError.Cst2AstSemanticError,
-        else => |e| e,
-    };
-    errdefer cr_rr_resolver.deinit();
 
     // Pass 2: Productions
     var productions = try expr_allocator.alloc(*const ast.Expr, nonterminal_count);
@@ -597,6 +610,14 @@ pub fn cstToEbnf(
         const nt = nonterminals_map.get(nt_string).?;
         productions[nt] = try converter.rhs(rhs);
     }
+    // A resolver object is not needed at all if both precedence and priority
+    // blocks are empty.
+    const conflict_resolver = if (cr_sr_map.capacity() == 0 and cr_rr_resolver == null) null else cr.Resolver{
+        .sr = cr_sr_map,
+        .rr = cr_rr_resolver,
+        .relabeling = null,
+        .relabeling_allocator = cr_allocator,
+    };
     return .{ sym.SymbolSpec{
         .terminals = .{
             .eoi = terminal_id,
@@ -610,12 +631,7 @@ pub fn cstToEbnf(
             .node_forming_count = node_forming_nt_count,
             .names = node_forming_nt_names.ptr,
         },
-    }, productions.ptr, sym_diagnostic, cr.Resolver{
-        .sr = cr_sr_map,
-        .rr = cr_rr_resolver,
-        .relabeling = null,
-        .relabeling_allocator = cr_allocator,
-    } };
+    }, productions.ptr, sym_diagnostic, conflict_resolver };
 }
 
 /// Convenience function for `cstToEbnf`.
