@@ -63,9 +63,12 @@ pub const Digraph = struct {
     /// Kahn's algorithm (in-degree counting) for topological sort; result
     /// stored into `answer`. Return the length of the resulting sequence
     /// produced (may be less than `n` if there is cycle).
-    pub fn topologicalSort(self: @This(), allocator: std.mem.Allocator, answer: [*]u32) std.mem.Allocator.Error!u32 {
-        var degree = try allocator.alloc(u32, self.n); // in degree left of each node
-        defer allocator.free(degree);
+    /// If `degree_array` is provided, it will be borrowed (otherwise one is
+    /// allocated and freed) and it will include in-degrees for nodes after
+    /// their removable in-edges are deleted according to Kahn's algorithm.
+    pub fn topologicalSort(self: @This(), allocator: std.mem.Allocator, answer: [*]u32, degree_array: ?[*]u32) std.mem.Allocator.Error!u32 {
+        var degree = if (degree_array) |da| da[0..self.n] else try allocator.alloc(u32, self.n);
+        defer if (degree_array == null) allocator.free(degree);
         var work: std.ArrayList(u32) = .empty; // work list of nodes with degree=0
         defer work.deinit(allocator);
         // Initialize `degree` with in degrees
@@ -94,6 +97,54 @@ pub const Digraph = struct {
             }
         }
         return n_visited;
+    }
+
+    /// Find an example cycle after a `topologicalSort` call. You must pass in
+    /// the resulting `degree` array. Result is a list of unique nodes in a cycle,
+    /// such that each a[i+1] has an edge to previous a[i], and a[0] has also
+    /// an edge to a[last]. It's allocated and owned by caller.
+    pub fn exampleCycle(self: @This(), allocator: std.mem.Allocator, degree: [*]u32) std.mem.Allocator.Error![]u32 {
+        // We only search within nodes that have a non-0 `degree`.
+        // To start we pick an arbitrary node since the cycle itself is also
+        // arbitrary.
+        var origin: u32 = undefined;
+        for (degree[0..self.n], 0..) |deg, u| {
+            if (deg > 0) {
+                origin = @intCast(u);
+                break;
+            }
+        }
+        // Then do a standard path find until we search back to `origin`.
+        var stack: std.ArrayList(u32) = .empty;
+        defer stack.deinit(allocator);
+        var parent = try allocator.alloc(u32, self.n);
+        defer allocator.free(parent);
+        var visited = try std.DynamicBitSetUnmanaged.initEmpty(allocator, self.n);
+        defer visited.deinit(allocator);
+        try stack.append(allocator, origin);
+        // `visited.set(origin)` deliberately not done
+        while (stack.pop()) |at| {
+            if (at == origin and visited.isSet(origin)) {
+                // It's the second time we visit here, done
+                var path: std.ArrayList(u32) = .empty;
+                defer path.deinit(allocator);
+                var u = at;
+                try path.append(allocator, at);
+                while (parent[u] != at) {
+                    u = parent[u];
+                    try path.append(allocator, u);
+                }
+                return path.toOwnedSlice(allocator);
+            }
+            for (self.succ[at]) |nb| {
+                if (visited.isSet(nb)) continue;
+                if (degree[nb] == 0) continue; // This node is not part of any cycle
+                visited.set(nb);
+                parent[nb] = at;
+                try stack.append(allocator, nb);
+            }
+        }
+        unreachable;
     }
 
     /// Tarjan's SCC algorithm

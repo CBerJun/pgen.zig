@@ -606,16 +606,30 @@ pub fn cstToEbnf(
         }
         break :priority_block cr_rr_builder.retrieve() catch |err| return switch (err) {
             error.InconsistentRank => blk: {
+                // Present the cycle to the user; fortunately we've tracked the
+                // ID to name mapping in two places: the node forming names and
+                // the nodeless names in `sym_diagnostic`.
+                var aw: std.Io.Writer.Allocating = .init(scrap_allocator);
+                defer aw.deinit();
+                for (cr_rr_builder.cycle_nodes) |nt| {
+                    const name = if (nt < node_forming_nt_count) node_forming_nt_names[nt] else sym_diagnostic.nodeless_nt_names[nt - node_forming_nt_count];
+                    // Remember edge u -> v means u > v, and the cycle returned
+                    // has reverse order.
+                    aw.writer.print("{s} < ", .{name}) catch return error.OutOfMemory;
+                }
+                const first = cr_rr_builder.cycle_nodes[0];
+                const first_name = if (first < node_forming_nt_count) node_forming_nt_names[first] else sym_diagnostic.nodeless_nt_names[first - node_forming_nt_count];
+                // Lastly, cycle[0] has an edge to cycle[last].
+                aw.writer.writeAll(first_name) catch return error.OutOfMemory;
                 // Report error on the keyword 'precedence' to inform user this
                 // is a holistic error on that entire section.
                 grammar_it.loadState(target_state);
                 const priority_token = grammar_it.eatToken();
-                // TODO: which cycle caused the error
                 break :blk fatalAt(
                     aggregator,
                     priority_token,
-                    "inconsistent priority section (a nonterminal is both < and > another)",
-                    .{},
+                    "inconsistent priority section ({s})",
+                    .{aw.written()},
                 );
             },
             else => |e| e,

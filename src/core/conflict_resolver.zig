@@ -85,8 +85,10 @@ pub const ReduceReduceBuilder = struct {
     allocator: std.mem.Allocator,
     /// Adjacency of graph in which there is an edge u -> v iff u > v.
     succ: []std.ArrayList(u32),
-    /// If `retrieve` has been called
-    retrieved: bool,
+    /// If `succ` ownership has been successfully transferred
+    succ_transferred: bool,
+    /// See `retrieve`; set on error, owned, set to empty slice when transferred
+    cycle_nodes: []u32,
 
     pub fn init(num_nt: u32, allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
         const succ = try allocator.alloc(std.ArrayList(u32), num_nt);
@@ -94,17 +96,19 @@ pub const ReduceReduceBuilder = struct {
         return .{
             .allocator = allocator,
             .succ = succ,
-            .retrieved = false,
+            .succ_transferred = false,
+            .cycle_nodes = &.{},
         };
     }
 
     pub fn deinit(self: *@This()) void {
-        if (!self.retrieved) {
+        if (!self.succ_transferred) {
             for (self.succ) |*al| {
                 al.deinit(self.allocator);
             }
             self.allocator.free(self.succ);
         }
+        self.allocator.free(self.cycle_nodes);
         self.* = undefined;
     }
 
@@ -132,13 +136,15 @@ pub const ReduceReduceBuilder = struct {
         }
         self.allocator.free(self.succ);
         self.succ = undefined;
-        self.retrieved = true;
+        self.succ_transferred = true;
         // Check for cycles in the digraph, and topological sort
-        // TODO: diagnostic, which cycle?
         const top_order = try self.allocator.alloc(u32, graph.n);
         defer self.allocator.free(top_order);
-        if ((try graph.topologicalSort(self.allocator, top_order.ptr)) < graph.n) {
-            // Cycle detected
+        const degree = try self.allocator.alloc(u32, graph.n);
+        defer self.allocator.free(degree);
+        if ((try graph.topologicalSort(self.allocator, top_order.ptr, degree.ptr)) < graph.n) {
+            // Cycle detected, find an example cycle
+            self.cycle_nodes = try graph.exampleCycle(self.allocator, degree.ptr);
             return error.InconsistentRank;
         }
         return GraphScanRRResolver.init(graph, top_order.ptr, self.allocator);
