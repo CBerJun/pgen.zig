@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const pgen_core = @import("pgen_core");
+const formatString = @import("./tokenizer.zig").formatString;
 
 /// Dump various data in a CFG in a human readable way.
 const CfgDumper = struct {
@@ -81,15 +82,7 @@ const CfgDumper = struct {
         // The correct suffix is at index `lo - 1`.
         const lc = terminals.literal[lo - 1];
         const in_lc_index = tid - self.literal_token_thresholds[lo - 1];
-        try writer.writeByte('"');
-        for (lc.literals[in_lc_index]) |ch| {
-            switch (ch) {
-                '\\', '"' => try writer.print("\\{c}", .{ch}),
-                else => try writer.writeByte(ch),
-            }
-        }
-        try writer.writeByte('"');
-        try writer.writeAll(lc.suffix);
+        try formatString(lc.literals[in_lc_index], lc.suffix, writer);
     }
 
     pub fn writeSymbol(self: @This(), writer: *std.Io.Writer, symbol: pgen_core.cfg.Symbol) std.Io.Writer.Error!void {

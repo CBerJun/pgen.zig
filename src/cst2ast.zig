@@ -5,6 +5,7 @@ const ast = pgen_core.ast;
 const sym = pgen_core.sym;
 const diagnostic = pgen_core.diagnostic;
 const cr = pgen_core.conflict_resolver;
+const formatStringToken = @import("./tokenizer.zig").formatStringToken;
 
 /// Managed `ast.Ebnf` with arena allocators and `ExprPool` which holds
 /// the rhs EBNF nodes. This won't work if you have multiple `ast.Ebnf`s
@@ -502,13 +503,18 @@ pub fn cstToEbnf(
                         .{terminal_token.payload.word},
                     ),
                 },
-                .STRING => symbol_manager.resolveLiteralToken(terminal_token) orelse return fatalAt(
-                    aggregator,
-                    terminal_token,
-                    // TODO: stringify the literal token
-                    "literal token is never used in any production",
-                    .{},
-                ),
+                .STRING => symbol_manager.resolveLiteralToken(terminal_token) orelse {
+                    var aw: std.Io.Writer.Allocating = .init(scrap_allocator);
+                    defer aw.deinit();
+                    // Write failed must be due to OOM in allocating writer
+                    formatStringToken(terminal_token.*, &aw.writer) catch return error.OutOfMemory;
+                    return fatalAt(
+                        aggregator,
+                        terminal_token,
+                        "literal token {s} is never used in any production",
+                        .{aw.written()},
+                    );
+                },
                 else => unreachable,
             };
             cr_sr_builder.addRule(nt, terminal, rel) catch |err| return switch (err) {
