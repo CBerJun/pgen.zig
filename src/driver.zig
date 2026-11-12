@@ -31,6 +31,9 @@ pub const Driver = struct {
         token_extra: []const []const u8 = &.{},
         dump_cfg: bool = false,
         dump_states: bool = false,
+        // `.graph_scan` should work fine in most cases when there aren't too
+        // many queries.
+        rr_resolver_tag: pgen_core.conflict_resolver.RRResolverTag = .graph_scan,
     };
 
     pub fn init(allocator: std.mem.Allocator, input: *std.Io.Reader, stderr: *std.Io.Writer, output: *std.Io.Writer, config: Config) @This() {
@@ -92,7 +95,7 @@ pub const Driver = struct {
         var cfg_managed, var symbol_spec, var sym_diagnostic, const conflict_resolver = blk: {
             var cst = try self.goCst(&aggregator);
             defer cst.deinit(self.allocator);
-            var ast = cst2ast.EbnfManaged.fromCst(cst, self.allocator, self.allocator, &aggregator) catch |err| return switch (err) {
+            var ast = cst2ast.EbnfManaged.fromCst(cst, self.allocator, self.allocator, &aggregator, self.config.rr_resolver_tag) catch |err| return switch (err) {
                 error.Cst2AstSemanticError => blk2: {
                     try aggregator.printDiagnostics(self.stderr);
                     break :blk2 error.GrammarError;

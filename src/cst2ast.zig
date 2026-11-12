@@ -40,7 +40,7 @@ pub const EbnfManaged = struct {
         }
     };
 
-    pub fn fromCst(cst: psr.CstNode, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator, aggregator: *diagnostic.Aggregator) (SemanticError || std.mem.Allocator.Error)!@This() {
+    pub fn fromCst(cst: psr.CstNode, allocator: std.mem.Allocator, scrap_allocator: std.mem.Allocator, aggregator: *diagnostic.Aggregator, rr_resolver_tag: cr.RRResolverTag) (SemanticError || std.mem.Allocator.Error)!@This() {
         var expr_arena = try allocator.create(std.heap.ArenaAllocator);
         expr_arena.* = .init(allocator);
         errdefer {
@@ -65,6 +65,7 @@ pub const EbnfManaged = struct {
             allocator,
             scrap_allocator,
             aggregator,
+            rr_resolver_tag,
         );
         return .{
             .symbol_spec = symbol_spec,
@@ -153,6 +154,7 @@ pub fn cstToEbnf(
     cr_allocator: std.mem.Allocator,
     scrap_allocator: std.mem.Allocator,
     aggregator: *diagnostic.Aggregator,
+    rr_resolver_tag: cr.RRResolverTag,
 ) (SemanticError || std.mem.Allocator.Error)!struct { sym.SymbolSpec, ast.EbnfProductions, sym.DiagnosticInfo, ?cr.Resolver } {
     // Pass 1: Collect terminals and nonterminals
     var named_terminals_map: std.StringHashMapUnmanaged(u32) = .empty;
@@ -604,7 +606,7 @@ pub fn cstToEbnf(
                 lhs = rhs; // Current RHS is next relation's LHS
             }
         }
-        break :priority_block cr_rr_builder.retrieve() catch |err| return switch (err) {
+        break :priority_block cr_rr_builder.retrieve(rr_resolver_tag) catch |err| return switch (err) {
             error.InconsistentRank => blk: {
                 // Present the cycle to the user; fortunately we've tracked the
                 // ID to name mapping in two places: the node forming names and

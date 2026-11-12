@@ -28,5 +28,6 @@
         "BBST",
         "inited",
         "irreflexive",
+        "vtable",
     ]
 }

@@ -16,6 +16,7 @@ const ParsedArgs = struct {
     out_file_path: []u8 = &.{},
     dump_cfg: bool = false,
     dump_states: bool = false,
+    rr_resolver_tag: pgen.conflict_resolver.RRResolverTag = .graph_scan,
     help: bool = false,
 
     pub fn deinit(self: *@This()) void {
@@ -42,6 +43,7 @@ const CliParser = struct {
         \\    -a ALGORITHM      Table gen algorithm to use (slr (default), lr0)
         \\    -cst-owns-token   If set, `CSTNode`s will own the passed in tokens. There is implication on mem management. See generated source's doc.
         \\    -token-extra CODE Extra source code to add into the `Token` struct
+        \\    -rr-resolver TAG  Reduce-reduce conflict resolver (graph_scan, dp)
         \\    -h                Print this message and exit
         \\
         \\Debug options for developers:
@@ -136,6 +138,16 @@ const CliParser = struct {
                 ans.dump_cfg = true;
             } else if (std.mem.eql(u8, rest, "dump-states")) {
                 ans.dump_states = true;
+            } else if (std.mem.eql(u8, rest, "rr-resolver")) {
+                if (self.iterator.next()) |payload| {
+                    ans.rr_resolver_tag = std.meta.stringToEnum(pgen.conflict_resolver.RRResolverTag, payload) orelse {
+                        self.aggregator.add(.fatal, "invalid reduce-reduce resolver {s}", .{payload});
+                        return error.CliParseError;
+                    };
+                } else {
+                    self.aggregator.add(.fatal, "expected parameter following -rr-resolver", .{});
+                    return error.CliParseError;
+                }
             } else {
                 self.aggregator.add(.fatal, "unrecognized argument -{s}", .{rest});
                 return error.CliParseError;

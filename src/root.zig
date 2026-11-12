@@ -10,3 +10,4 @@ pub const backends = core.backends;
 pub const lr0 = core.lr0;
 pub const explain = @import("./explain.zig");
 pub const driver = @import("./driver.zig");
+pub const conflict_resolver = core.conflict_resolver;
