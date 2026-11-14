@@ -167,7 +167,7 @@ pub const Driver = struct {
                         } else blk: {
                             const follow_set = try ds.getFollowSet();
                             break :blk pgen_core.backends.SlrBackend(
-                                pgen_core.backends.SwitchActionHandler(@TypeOf(cr_passed)),
+                                @TypeOf(cr_passed),
                                 pgen_core.backends.SwitchGotoHandler,
                             ){
                                 .emitter = zig_emitter,

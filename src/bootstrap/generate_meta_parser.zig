@@ -31,7 +31,8 @@ pub fn main(init: std.process.Init) !void {
     const writer = &out_writer.interface;
 
     var backend: pgen_core.backends.SlrBackend(
-        pgen_core.backends.SwitchActionHandler(void),
+        // Meta parser currently does not need conflict resolution
+        void,
         pgen_core.backends.SwitchGotoHandler,
     ) = .{
         .emitter = .{

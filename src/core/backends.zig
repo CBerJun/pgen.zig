@@ -778,7 +778,8 @@ const ActionRow = struct {
     }
 };
 
-/// Shared writeActionMethod implementation using nested switch.
+/// Convert action table (`std.ArrayList(ActionRow)`) into `Parser.action`
+/// method in generated parser, using nested `switch` (naive).
 fn actionTableToActionMethodSwitch(symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, action_table: std.ArrayList(ActionRow), emitter: ZigEmitter) std.Io.Writer.Error!void {
     const num_states: u32 = @intCast(action_table.items.len);
     const state_bits = emitter.stateBits(num_states);
@@ -833,7 +834,8 @@ fn actionTableToActionMethodSwitch(symbol_spec: *const sym.SymbolSpec, productio
     try emitter.endMethod();
 }
 
-/// Generate arrays: action, base, check; by default we reject
+/// Similar to `actionTableToActionMethodSwitch` but generate more efficient
+/// parser using constant arrays packed with data.
 /// TODO: many heuristic optimizations to be made here.
 fn actionTableToActionMethodPacked(symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, action_table: std.ArrayList(ActionRow), emitter: ZigEmitter, scrap_allocator: std.mem.Allocator) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     // An action in generated compact representation.
@@ -1059,8 +1061,8 @@ fn actionTableToActionMethodPacked(symbol_spec: *const sym.SymbolSpec, productio
     try emitter.endMethod();
 }
 
-/// Specialized `SwitchActionHandler(void)`.
-const SwitchActionHandlerNoConflict = struct {
+/// Specialized `ActionHandler(void)`.
+const ActionHandlerNoConflict = struct {
     symbol_spec: *const sym.SymbolSpec,
     productions: *const cfg.CfgProductions,
     conflict_resolver: void,
@@ -1205,10 +1207,8 @@ const SwitchActionHandlerNoConflict = struct {
         // New `state` can be any
         return self.shift(allocator, self.symbol_spec.terminals.eoi, 0);
     }
-    pub fn writeActionMethod(self: *@This(), emitter: ZigEmitter, allocator: std.mem.Allocator) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
+    pub fn done(self: *@This(), allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
         try self.potentialEndOfPreviousRow(allocator);
-        // try actionTableToActionMethodSwitch(self.symbol_spec, self.productions, self.action_table, emitter);
-        try actionTableToActionMethodPacked(self.symbol_spec, self.productions, self.action_table, emitter, allocator);
     }
 };
 
@@ -1221,11 +1221,11 @@ const SwitchActionHandlerNoConflict = struct {
 
 /// Emit Zig code to handle any LR-style ACTION table. A `ConflictResolver_`
 /// of `void` means no conflict resolution.
-pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
+pub fn ActionHandler(comptime ConflictResolver_: type) type {
     if (ConflictResolver_ == void) {
         // We have specialized the case when no conflict resolution is needed
         // (optimized code/data model).
-        return SwitchActionHandlerNoConflict;
+        return ActionHandlerNoConflict;
     }
     return struct {
         symbol_spec: *const sym.SymbolSpec,
@@ -1515,10 +1515,8 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
             // `state` can be anything (shifting on EOI = accept)
             return self.shift(allocator, self.symbol_spec.terminals.eoi, 0);
         }
-        pub fn writeActionMethod(self: *@This(), emitter: ZigEmitter, allocator: std.mem.Allocator) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
+        pub fn done(self: *@This(), allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
             try self.potentialEndOfPreviousRow(allocator);
-            // try actionTableToActionMethodSwitch(self.symbol_spec, self.productions, self.action_table, emitter);
-            try actionTableToActionMethodPacked(self.symbol_spec, self.productions, self.action_table, emitter, allocator);
         }
     };
 }
@@ -1543,16 +1541,16 @@ pub fn ReportedConflict(comptime Item: type) type {
 }
 
 /// Generic Zig backend for SLR parsers.
-pub fn SlrBackend(comptime ActionHandler: type, comptime GotoHandler: type) type {
+pub fn SlrBackend(comptime ConflictResolver: type, comptime GotoHandler: type) type {
     return struct {
         /// Controls output of source code
         emitter: ZigEmitter,
         /// Precomputed FOLLOW sets for SLR
         follow_sets: *const lr0.DpBasedSets,
         /// Conflict resolver to forward to the action handler (borrowed)
-        conflict_resolver: ActionHandler.ConflictResolver,
+        conflict_resolver: ConflictResolver,
         /// ACTION handler
-        action_handler: ActionHandler = undefined,
+        action_handler: ActionHandler(ConflictResolver) = undefined,
         /// GOTO handler
         goto_handler: GotoHandler,
         /// If there is a conflict, it will be logged to here.
@@ -1577,14 +1575,14 @@ pub fn SlrBackend(comptime ActionHandler: type, comptime GotoHandler: type) type
                 cr.free(self.allocator);
         }
 
-        pub const Error = ConflictError || std.Io.Writer.Error || std.mem.Allocator.Error || (if (ActionHandler.ConflictResolver == void) error{} else ActionHandler.ConflictResolver.Error);
+        pub const Error = ConflictError || std.Io.Writer.Error || std.mem.Allocator.Error || (if (ConflictResolver == void) error{} else ConflictResolver.Error);
 
         pub fn beginTableGen(self: *@This(), symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, states: *const std.ArrayList([]lr0.Item), allocator: std.mem.Allocator) Error!void {
             self.states = states;
             self.allocator = allocator;
             self.symbol_spec = symbol_spec;
             self.productions = productions;
-            self.action_handler = try ActionHandler.init(
+            self.action_handler = try ActionHandler(ConflictResolver).init(
                 self.allocator,
                 symbol_spec,
                 productions,
@@ -1637,7 +1635,8 @@ pub fn SlrBackend(comptime ActionHandler: type, comptime GotoHandler: type) type
         }
         pub fn endTableGen(self: *@This()) Error!void {
             try self.emitter.writeProlog(self.symbol_spec);
-            try self.action_handler.writeActionMethod(self.emitter, self.allocator);
+            try self.action_handler.done(self.allocator);
+            try actionTableToActionMethodPacked(self.symbol_spec, self.productions, self.action_handler.action_table, self.emitter, self.allocator);
             const num_states: u32 = @intCast(self.states.?.items.len);
             try self.goto_handler.writeGotoMethod(self.emitter, self.symbol_spec, num_states);
             try self.emitter.writeEpilog(num_states);
