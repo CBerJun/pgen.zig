@@ -176,9 +176,8 @@ pub const ZigEmitter = struct {
         for (self.token_extra) |line| {
             try self.writeLine(line);
         }
-        if (self.token_extra.len > 0) {
-            try self.writeNewline();
-        }
+        try self.writeNewline();
+
         try self.writeLines(
             \\pub fn assertTag(self: @This(), tag: Tag) void {
             \\    std.debug.assert(self.tag == tag);

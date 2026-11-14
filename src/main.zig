@@ -215,10 +215,11 @@ fn mainInner(init: std.process.Init, gpa: std.mem.Allocator, stderr: *std.Io.Wri
     var out_file_writer = out_file.writer(init.io, write_buffer);
     const writer = &out_file_writer.interface;
 
+    const token_extra: []const []const u8 = if (cli.token_extra.len > 0) &.{cli.token_extra} else &.{};
     const driver: pgen.driver.Driver = .init(gpa, reader, stderr, writer, .{
         .algorithm = cli.algorithm,
         .cst_owns_token = cli.cst_owns_token,
-        .token_extra = &.{cli.token_extra},
+        .token_extra = token_extra,
         .dump_cfg = cli.dump_cfg,
         .dump_states = cli.dump_states,
     });
