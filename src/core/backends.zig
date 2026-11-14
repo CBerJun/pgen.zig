@@ -142,6 +142,7 @@ pub const ZigEmitter = struct {
             }
             try self.out.writeAll("        });\n");
         }
+        // There is at least 1 node forming nt: the entry
         try self.out.print(
             \\    }};
             \\}};
@@ -398,10 +399,12 @@ pub const ZigEmitter = struct {
     }
 
     pub fn tagBackingIntBits(_: @This(), symbol_spec: *const sym.SymbolSpec) u16 {
+        // There is at least 1 terminal: the end-of-input
         return std.math.log2_int_ceil(u32, symbol_spec.terminals.count);
     }
 
     pub fn ntBits(_: @This(), symbol_spec: *const sym.SymbolSpec) u16 {
+        // There is at least 1 nonterminal: the entry
         return std.math.log2_int_ceil(u32, symbol_spec.nonterminals.count);
     }
 
@@ -417,6 +420,7 @@ pub const ZigEmitter = struct {
     }
 
     pub fn stateBits(_: @This(), num_states: u32) std.math.Log2IntCeil(u32) {
+        // There is at least 1 state: the starting state 0.
         return std.math.log2_int_ceil(u32, num_states);
     }
 
@@ -899,7 +903,9 @@ fn actionTableToActionMethodPacked(symbol_spec: *const sym.SymbolSpec, productio
         }
         const max_term = max_term_opt orelse {
             // If row is empty (no exception), assign `no_row`. This is currently
-            // only possible with LR(0) which reduces for the entire row.
+            // only possible with LR(0) which reduces for the entire row, or when
+            // we have a nonproductive entry nt (i.e. when the grammar does not
+            // accept any string).
             t_base[state] = no_row;
             continue;
         };
