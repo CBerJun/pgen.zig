@@ -106,7 +106,8 @@ pub const ZigEmitter = struct {
             \\        std.debug.assert(self.tag == tag);
             \\    }}
             \\
-            \\    pub const Tag = enum(u{}) {{
+            \\    const TagSize = u{};
+            \\    pub const Tag = enum(TagSize) {{
             \\
         , .{self.tagBackingIntBits(symbol_spec)});
         for (symbol_spec.terminals.literal) |collection| {
@@ -441,7 +442,7 @@ pub const ZigEmitter = struct {
     pub fn implementAction(self: @This()) std.Io.Writer.Error!void {
         try self.out.writeAll(
             \\
-            \\    fn action(state: StateSize, lookahead: @typeInfo(Token.Tag).@"enum".tag_type) Action {
+            \\    fn action(state: StateSize, lookahead: Token.TagSize) Action {
             \\
         );
     }
@@ -777,8 +778,8 @@ const ActionRow = struct {
     }
 };
 
-/// Shared writeActionMethod implementation.
-fn actionTableToActionMethod(symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, action_table: std.ArrayList(ActionRow), emitter: ZigEmitter) std.Io.Writer.Error!void {
+/// Shared writeActionMethod implementation using nested switch.
+fn actionTableToActionMethodSwitch(symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, action_table: std.ArrayList(ActionRow), emitter: ZigEmitter) std.Io.Writer.Error!void {
     const num_states: u32 = @intCast(action_table.items.len);
     const state_bits = emitter.stateBits(num_states);
     const tag_bits = emitter.tagBackingIntBits(symbol_spec);
@@ -827,6 +828,232 @@ fn actionTableToActionMethod(symbol_spec: *const sym.SymbolSpec, productions: *c
     }
     try emitter.out.writeAll(
         \\        };
+        \\
+    );
+    try emitter.endMethod();
+}
+
+/// Generate arrays: action, base, check; by default we reject
+/// TODO: many heuristic optimizations to be made here.
+fn actionTableToActionMethodPacked(symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, action_table: std.ArrayList(ActionRow), emitter: ZigEmitter, scrap_allocator: std.mem.Allocator) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
+    // An action in generated compact representation.
+    const CompactAction = union(enum) {
+        /// State number
+        shift: u32,
+        /// Rule ID
+        reduce: u32,
+        accept,
+        // Currently the default option is always to reject, so reject is never
+        // an exception.
+        // reject,
+    };
+    const ActionEntry = struct {
+        action: CompactAction,
+        /// The expected terminal/lookahead. If equals `empty` means unoccupied
+        /// cell; `action` is undefined in that case.
+        check: u32,
+
+        pub const empty_check = std.math.maxInt(u32);
+        pub const empty: @This() = .{
+            .action = undefined,
+            .check = empty_check,
+        };
+    };
+    // t_action is in fact action and check arrays combined.
+    var t_action: std.ArrayList(ActionEntry) = .empty;
+    defer t_action.deinit(scrap_allocator);
+    const num_states: u32 = @intCast(action_table.items.len);
+    // base[i] = no_row => No base offset; always use default action.
+    const no_row = std.math.maxInt(usize);
+    var t_base = try scrap_allocator.alloc(usize, num_states);
+    defer scrap_allocator.free(t_base);
+    // Used base may not be reused unless two rows are exactly identical.
+    var used_base: std.AutoHashMapUnmanaged(usize, void) = .empty;
+    defer used_base.deinit(scrap_allocator);
+
+    // Process row by row (TODO: sort heuristic)
+    for (action_table.items, 0..) |row, state| {
+        // Find the max terminal that represents an exception
+        var max_term_opt: ?usize = null;
+        for (row.shifts.items) |shift| {
+            max_term_opt = if (max_term_opt) |max_term| @max(max_term, shift.terminal) else shift.terminal;
+        }
+        for (row.reduces.items) |reduce_group| {
+            for (reduce_group.lookaheads) |terminal| {
+                max_term_opt = if (max_term_opt) |max_term| @max(max_term, terminal) else terminal;
+            }
+        }
+        const max_term = max_term_opt orelse {
+            // If row is empty (no exception), assign `no_row`. This is currently
+            // only possible with LR(0) which reduces for the entire row.
+            t_base[state] = no_row;
+            continue;
+        };
+        // Find a spot in action table to insert the row (greedy).
+        const n = t_action.items.len;
+        // Base defaults to n, when no candidate in 0..n works.
+        var base: usize = n;
+        candidate_check: for (0..n) |candidate| {
+            if (used_base.get(candidate) != null) {
+                // TODO: identical rows can share a base
+                continue;
+            }
+            for (row.shifts.items) |shift| {
+                const i = candidate + shift.terminal;
+                if (i < n and t_action.items[i].check != ActionEntry.empty_check) {
+                    continue :candidate_check;
+                }
+            }
+            for (row.reduces.items) |reduce_group| {
+                for (reduce_group.lookaheads) |terminal| {
+                    const i = candidate + terminal;
+                    if (i < n and t_action.items[i].check != ActionEntry.empty_check) {
+                        continue :candidate_check;
+                    }
+                }
+            }
+            // This candidate works!
+            base = candidate;
+            break;
+        }
+        // Once we've found a spot, or we've decided no existing offset works
+        // as base, we can insert the row.
+        t_base[state] = base;
+        try used_base.put(scrap_allocator, base, {});
+        const size_to_ensure = base + max_term + 1;
+        const size_to_extend = size_to_ensure -| n;
+        try t_action.appendNTimes(scrap_allocator, .empty, size_to_extend);
+        // Now fill in the action table.
+        for (row.shifts.items) |shift| {
+            const i = base + shift.terminal;
+            t_action.items[i] = .{
+                .check = shift.terminal,
+                .action = if (shift.terminal == symbol_spec.terminals.eoi) .accept else .{ .shift = shift.state },
+            };
+        }
+        for (row.reduces.items) |reduce_group| {
+            for (reduce_group.lookaheads) |terminal| {
+                const i = base + terminal;
+                t_action.items[i] = .{
+                    .check = terminal,
+                    .action = .{ .reduce = reduce_group.production },
+                };
+            }
+        }
+    }
+
+    // Table calculated; proceed to table emission.
+    try emitter.out.writeAll(
+        \\    const Packed = struct {
+        \\
+    );
+    // Elements in base are offsets into action.
+    const action_len = t_action.items.len;
+    const action_bits = if (action_len == 0) 0 else std.math.log2_int_ceil(usize, action_len);
+    try emitter.out.print("        const Offset = u{};\n", .{action_bits});
+    try emitter.out.writeAll("        const base = [_]?Offset{");
+    for (t_base) |offset| {
+        if (offset == no_row) {
+            try emitter.out.writeAll("null,");
+        } else {
+            // This is the idea, but will not compile since we used ceil, so left
+            // shift can overflow:
+            // std.debug.assert(offset < @shlExact(@as(usize, 1), action_bits));
+            try emitter.out.print("{},", .{offset});
+        }
+    }
+    try emitter.out.writeAll("};\n");
+    const production_bits = if (productions.count == 0) 0 else std.math.log2_int_ceil(u32, productions.count);
+    try emitter.out.print("        const ProductionSize = u{};\n", .{production_bits});
+    try emitter.out.writeAll(
+        \\        const CompactAction = union(enum) {
+        \\            shift: StateSize,
+        \\            reduce: ProductionSize,
+        \\            accept,
+        \\
+        \\            fn toNonCompact(self: @This()) Action {
+        \\                return switch (self) {
+        \\                    .accept => .accept,
+        \\                    .shift => |new_state| .{.shift = new_state},
+        \\                    .reduce => |p| .{.reduce = .{.rhs_len = rhs_len[p], .lhs = lhs[p]}},
+        \\                };
+        \\            }
+        \\        };
+        \\
+    );
+    // To avoid collision with action() method:
+    try emitter.out.writeAll("        const action_ = [_]CompactAction{");
+    for (t_action.items) |entry| {
+        if (entry.check == ActionEntry.empty_check) {
+            try emitter.out.writeAll("undefined");
+        } else switch (entry.action) {
+            .accept => {
+                @branchHint(.unlikely);
+                try emitter.out.writeAll(".accept");
+            },
+            .reduce => |prod_id| {
+                try emitter.out.print(".{{.reduce={}}}", .{prod_id});
+            },
+            .shift => |new_state| {
+                try emitter.out.print(".{{.shift={}}}", .{new_state});
+            },
+        }
+        try emitter.out.writeByte(',');
+    }
+    try emitter.out.writeAll("};\n");
+    try emitter.out.writeAll("        const check = [_]?Token.TagSize{");
+    for (t_action.items) |entry| {
+        if (entry.check == ActionEntry.empty_check) {
+            try emitter.out.writeAll("null,");
+        } else {
+            try emitter.out.print("{},", .{entry.check});
+        }
+    }
+    try emitter.out.writeAll("};\n");
+    // We need additional tables for production LHS and RHS count
+    try emitter.out.writeAll("        const lhs = [_]NtSize{");
+    for (productions.lhs[0..productions.count]) |lhs| {
+        try emitter.out.print("{},", .{lhs});
+    }
+    try emitter.out.writeAll("};\n");
+    {
+        var max_len: u32 = 0;
+        for (productions.rhs[0..productions.count]) |rhs| {
+            max_len = @max(max_len, @as(u32, @intCast(rhs.len)));
+        }
+        // Note the +1:
+        const rhs_len_size = if (max_len == 0) 0 else std.math.log2_int_ceil(u32, max_len + 1);
+        try emitter.out.print("        const RhsLenSize = u{};\n", .{rhs_len_size});
+    }
+    try emitter.out.writeAll("        const rhs_len = [_]RhsLenSize{");
+    for (productions.rhs[0..productions.count]) |rhs| {
+        try emitter.out.print("{},", .{rhs.len});
+    }
+    try emitter.out.writeAll("};\n");
+    try emitter.out.writeAll(
+        \\    };
+    ); // end const Packed = struct
+
+    // Tables emitted, now comes lookup logic
+    // Be very careful with integer overflow.
+    try emitter.implementAction();
+    try emitter.out.writeAll(
+        //\\        std.debug.print("state: {} lookahead: {} ", .{state, lookahead});
+        \\        if (Packed.base[state]) |B| {
+        \\            const I = B + lookahead;
+        \\            if (Packed.check[I]) |expected_column| {
+        \\                if (expected_column == lookahead) {
+        //\\switch (Packed.action_[I]) {
+        //\\.accept => std.debug.print("accept\n", .{}),
+        //\\.shift => |s| std.debug.print("shift {}\n", .{s}),
+        //\\.reduce => |r| std.debug.print("reduce {}\n", .{r}),
+        //\\}
+        \\                    return Packed.action_[I].toNonCompact();
+        \\                }
+        \\            }
+        \\        }
+        //\\        std.debug.print("reject\n", .{});
+        \\        return .reject;
         \\
     );
     try emitter.endMethod();
@@ -980,7 +1207,8 @@ const SwitchActionHandlerNoConflict = struct {
     }
     pub fn writeActionMethod(self: *@This(), emitter: ZigEmitter, allocator: std.mem.Allocator) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
         try self.potentialEndOfPreviousRow(allocator);
-        try actionTableToActionMethod(self.symbol_spec, self.productions, self.action_table, emitter);
+        // try actionTableToActionMethodSwitch(self.symbol_spec, self.productions, self.action_table, emitter);
+        try actionTableToActionMethodPacked(self.symbol_spec, self.productions, self.action_table, emitter, allocator);
     }
 };
 
@@ -1289,7 +1517,8 @@ pub fn SwitchActionHandler(comptime ConflictResolver_: type) type {
         }
         pub fn writeActionMethod(self: *@This(), emitter: ZigEmitter, allocator: std.mem.Allocator) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
             try self.potentialEndOfPreviousRow(allocator);
-            try actionTableToActionMethod(self.symbol_spec, self.productions, self.action_table, emitter);
+            // try actionTableToActionMethodSwitch(self.symbol_spec, self.productions, self.action_table, emitter);
+            try actionTableToActionMethodPacked(self.symbol_spec, self.productions, self.action_table, emitter, allocator);
         }
     };
 }
