@@ -1142,7 +1142,6 @@ fn actionTableToActionMethodPacked(symbol_spec: *const sym.SymbolSpec, productio
         \\}
         //\\std.debug.print("reject\n", .{});
         \\return .reject;
-        \\
     );
     try emitter.endMethod();
 }
