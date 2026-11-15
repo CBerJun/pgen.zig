@@ -922,227 +922,405 @@ fn actionTableToActionMethodSwitch(symbol_spec: *const sym.SymbolSpec, productio
 
 /// Similar to `actionTableToActionMethodSwitch` but generate more efficient
 /// parser using constant arrays packed with data.
-/// TODO: many heuristic optimizations to be made here.
 fn actionTableToActionMethodPacked(symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, action_table: std.ArrayList(ActionRow), emitter: *ZigEmitter, scrap_allocator: std.mem.Allocator) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
-    // An action in generated compact representation.
-    const CompactAction = union(enum) {
-        /// State number
-        shift: u32,
-        /// Rule ID
-        reduce: u32,
-        accept,
-        // Currently the default option is always to reject, so reject is never
-        // an exception.
-        // reject,
+    var backend: ActionTablePackerBackend = .{
+        .action_rows = action_table.items,
+        .eoi = symbol_spec.terminals.eoi,
     };
-    const ActionEntry = struct {
-        action: CompactAction,
-        /// The expected terminal/lookahead. If equals `empty` means unoccupied
-        /// cell; `action` is undefined in that case.
-        check: u32,
+    var packer = try Packer(ActionTablePackerBackend).init(symbol_spec, productions, &backend, scrap_allocator);
+    defer packer.deinit();
+    try packer.makePack();
+    try packer.emit(emitter);
+}
 
-        pub const empty_check = std.math.maxInt(u32);
-        pub const empty: @This() = .{
-            .action = undefined,
-            .check = empty_check,
-        };
-    };
-    // t_action is in fact action and check arrays combined.
-    var t_action: std.ArrayList(ActionEntry) = .empty;
-    defer t_action.deinit(scrap_allocator);
-    const num_states: u32 = @intCast(action_table.items.len);
-    // base[i] = no_row => No base offset; always use default action.
-    const no_row = std.math.maxInt(usize);
-    var t_base = try scrap_allocator.alloc(usize, num_states);
-    defer scrap_allocator.free(t_base);
-    // Used base may not be reused unless two rows are exactly identical.
-    var used_base: std.AutoHashMapUnmanaged(usize, void) = .empty;
-    defer used_base.deinit(scrap_allocator);
+/// `Packer` backend for `[]ActionRow` representation of ACTION table.
+const ActionTablePackerBackend = struct {
+    /// BORROWED slice
+    action_rows: []ActionRow,
+    /// EOI token ID
+    eoi: u32,
 
-    // Process row by row (TODO: sort heuristic)
-    for (action_table.items, 0..) |row, state| {
-        // Find the max terminal that represents an exception
-        var max_term_opt: ?usize = null;
-        for (row.shifts.items) |shift| {
-            max_term_opt = if (max_term_opt) |max_term| @max(max_term, shift.terminal) else shift.terminal;
-        }
-        for (row.reduces.items) |reduce_group| {
-            for (reduce_group.lookaheads) |terminal| {
-                max_term_opt = if (max_term_opt) |max_term| @max(max_term, terminal) else terminal;
-            }
-        }
-        const max_term = max_term_opt orelse {
-            // If row is empty (no exception), assign `no_row`. This is currently
-            // only possible with LR(0) which reduces for the entire row, or when
-            // we have a nonproductive entry nt (i.e. when the grammar does not
-            // accept any string).
-            t_base[state] = no_row;
-            continue;
-        };
-        // Find a spot in action table to insert the row (greedy).
-        const n = t_action.items.len;
-        // Base defaults to n, when no candidate in 0..n works.
-        var base: usize = n;
-        candidate_check: for (0..n) |candidate| {
-            if (used_base.get(candidate) != null) {
-                // TODO: identical rows can share a base
-                continue;
-            }
-            for (row.shifts.items) |shift| {
-                const i = candidate + shift.terminal;
-                if (i < n and t_action.items[i].check != ActionEntry.empty_check) {
-                    continue :candidate_check;
+    const ExceptionIterator = struct {
+        /// Corresponding row (borrowed)
+        action_row: *ActionRow,
+        /// EOI token ID from owner
+        eoi: u32,
+        /// In `shifts` or `reduce`?
+        stage: enum { shift, reduce } = .shift,
+        /// The next index to return
+        i: u32 = 0,
+        /// Next secondary index to return (for reduce only)
+        j: u32 = 0,
+
+        fn next(self: *@This()) ?Packer(ActionTablePackerBackend).ActionEntry {
+            if (self.stage == .shift) {
+                if (self.i == self.action_row.shifts.items.len) {
+                    self.stage = .reduce;
+                    self.i = 0;
+                } else {
+                    defer self.i += 1;
+                    const shift = self.action_row.shifts.items[self.i];
+                    return .{
+                        .action = if (shift.terminal == self.eoi) .accept else .{ .shift = shift.state },
+                        .check = shift.terminal,
+                    };
                 }
             }
-            for (row.reduces.items) |reduce_group| {
-                for (reduce_group.lookaheads) |terminal| {
-                    const i = candidate + terminal;
-                    if (i < n and t_action.items[i].check != ActionEntry.empty_check) {
-                        continue :candidate_check;
+            std.debug.assert(self.stage == .reduce);
+            while (self.i < self.action_row.reduces.items.len) {
+                const group = self.action_row.reduces.items[self.i];
+                if (self.j == group.lookaheads.len) {
+                    self.j = 0;
+                    self.i += 1;
+                } else {
+                    defer self.j += 1;
+                    return .{
+                        .action = .{ .reduce = group.production },
+                        .check = group.lookaheads[self.j],
+                    };
+                }
+            }
+            return null;
+        }
+    };
+
+    fn numStates(self: @This()) u32 {
+        return @intCast(self.action_rows.len);
+    }
+
+    /// For now, always use reject as default
+    /// TODO: sometimes reduce can be a better default, analyze size of reduce
+    /// groups vs. number of reject columns
+    fn rowDefault(self: *@This(), state: u32) Packer(ActionTablePackerBackend).CompactAction {
+        _ = self;
+        _ = state;
+        return .reject;
+    }
+
+    fn rowExceptions(self: *@This(), state: u32) ExceptionIterator {
+        return .{ .action_row = &self.action_rows[state], .eoi = self.eoi };
+    }
+};
+
+/// Pack ACTION table into compact arrays. Intended to be useful to *all*
+/// (traditional) LR-family algorithms. A consumer must implement a `PackerBackend`
+/// supporting the following:
+/// ```zig
+/// const ExceptionIterator = struct {
+///     fn next(self: *@This()) ?Packer(PackerBackend).ActionEntry
+/// };
+/// fn numStates(self: @This()) u32
+/// /// Default action for this state
+/// fn rowDefault(self: *@This(), state: u32) Packer(PackerBackend).CompactAction
+/// /// Iterate through the exceptions (non-default columns)
+/// fn rowExceptions(self: *@This(), state: u32) ExceptionIterator
+/// ```
+/// TODO: many heuristic optimizations to be made here.
+fn Packer(comptime Backend: type) type {
+    return struct {
+        symbol_spec: *const sym.SymbolSpec,
+        productions: *const cfg.CfgProductions,
+        backend: *Backend,
+        num_states: u32,
+        /// `action` and `check` arrays combined.
+        t_action: std.ArrayList(ActionEntry),
+        /// Base of each row in compact `t_action`, or `no_row` if it's always
+        /// the default action.
+        t_base: []usize,
+        /// Default action in each state
+        /// TODO: substantial defaults are going to be rejects?
+        t_default: []CompactAction,
+        /// Used base may not be reused unless two rows are exactly identical
+        /// TODO: replace with a growing bitset?
+        used_base: std.AutoHashMapUnmanaged(usize, void),
+        /// Allocator for storing generated tables
+        allocator: std.mem.Allocator,
+
+        fn init(symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, backend: *Backend, allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
+            const num_states = backend.numStates();
+            const t_base = try allocator.alloc(usize, num_states);
+            const t_default = try allocator.alloc(CompactAction, num_states);
+            return .{
+                .symbol_spec = symbol_spec,
+                .productions = productions,
+                .backend = backend,
+                .num_states = num_states,
+                .t_action = .empty,
+                .t_base = t_base,
+                .t_default = t_default,
+                .used_base = .empty,
+                .allocator = allocator,
+            };
+        }
+
+        fn deinit(self: *@This()) void {
+            self.t_action.deinit(self.allocator);
+            self.allocator.free(self.t_base);
+            self.used_base.deinit(self.allocator);
+            self.allocator.free(self.t_default);
+        }
+
+        /// For heuristic of putting wider rows in first, we must sort the rows.
+        /// This struct includes facts that allow us to sort.
+        const SortEntry = struct {
+            /// Which state?
+            row: u32,
+            /// Minimum terminal that is an exception
+            min_terminal: u32,
+            /// Maximum terminal that is an exception
+            max_terminal: u32,
+
+            fn noException(row: u32) @This() {
+                return .{ .row = row, .min_terminal = std.math.maxInt(u32), .max_terminal = 0 };
+            }
+
+            fn isNoException(self: @This()) bool {
+                return self.max_terminal < self.min_terminal;
+            }
+
+            fn width(self: @This()) u32 {
+                // The only overflow case is when `noException`; when we handle those
+                // does not actually matter (they don't change the pact arrays anyway).
+                return self.max_terminal -| self.min_terminal;
+            }
+
+            /// Wider rows come first.
+            fn lessThan(_: void, a: @This(), b: @This()) bool {
+                const aw = a.width();
+                const bw = b.width();
+                // Stable sort key
+                return aw > bw or (aw == bw and (a.min_terminal > b.min_terminal or (a.min_terminal == b.min_terminal and a.row < b.row)));
+            }
+        };
+
+        /// An action in generated compact representation.
+        const CompactAction = union(enum) {
+            /// State number
+            shift: u32,
+            /// Rule ID
+            reduce: u32,
+            accept,
+            reject,
+
+            fn emit(self: @This(), emitter: *ZigEmitter) std.Io.Writer.Error!void {
+                switch (self) {
+                    .accept => {
+                        @branchHint(.unlikely);
+                        try emitter.out.writeAll(".accept");
+                    },
+                    .reduce => |prod_id| try emitter.out.print(".{{.reduce={}}}", .{prod_id}),
+                    .shift => |new_state| try emitter.out.print(".{{.shift={}}}", .{new_state}),
+                    .reject => try emitter.out.writeAll(".reject"),
+                }
+            }
+        };
+
+        /// An entry in the compact `action` array
+        const ActionEntry = struct {
+            action: CompactAction,
+            /// The expected terminal/lookahead. If equals `empty` means unoccupied
+            /// cell; `action` is undefined in that case.
+            check: u32,
+
+            pub const empty_check = std.math.maxInt(u32);
+            pub const empty: @This() = .{
+                .action = undefined,
+                .check = empty_check,
+            };
+        };
+
+        // base[i] = no_row => No base offset; always use default action.
+        const no_row = std.math.maxInt(usize);
+
+        fn makePack(self: *@This()) std.mem.Allocator.Error!void {
+            // Collect basic info on each row (first pass)
+            var sort_entries = try self.allocator.alloc(SortEntry, self.num_states);
+            defer self.allocator.free(sort_entries);
+            for (0..self.num_states) |state_usize| {
+                const state: u32 = @intCast(state_usize);
+                const entry = &sort_entries[state];
+                entry.* = .noException(state);
+                var it: Backend.ExceptionIterator = self.backend.rowExceptions(state);
+                while (it.next()) |action_entry| {
+                    const t = action_entry.check;
+                    entry.min_terminal = @min(entry.min_terminal, t);
+                    entry.max_terminal = @max(entry.max_terminal, t);
+                }
+            }
+            // Sort the rows (heuristic, widest row first inserted)
+            std.mem.sortUnstable(SortEntry, sort_entries, {}, SortEntry.lessThan);
+            // Now pack the rows into arrays
+            for (sort_entries) |sort_entry| {
+                const state = sort_entry.row;
+                if (sort_entry.isNoException()) {
+                    // If row is empty (no exception), assign `no_row`. This is currently
+                    // only possible with LR(0) which reduces for the entire row, or when
+                    // we have a nonproductive entry nt (i.e. when the grammar does not
+                    // accept any string).
+                    self.t_base[state] = no_row;
+                    continue;
+                }
+                // Find a spot in action table to insert the row (greedy).
+                const n = self.t_action.items.len;
+                // Base defaults to n, when no candidate in 0..n works.
+                var base: usize = n;
+                candidate_check: for (0..n) |candidate| {
+                    if (self.used_base.get(candidate) != null) {
+                        // TODO: identical rows can share a base
+                        continue;
+                    }
+                    var it: Backend.ExceptionIterator = self.backend.rowExceptions(state);
+                    while (it.next()) |action_entry| {
+                        const i = candidate + action_entry.check;
+                        if (i < n and self.t_action.items[i].check != ActionEntry.empty_check) {
+                            continue :candidate_check;
+                        }
+                    }
+                    // This candidate works!
+                    base = candidate;
+                    break;
+                }
+                // Once we've found a spot, or we've decided no existing offset works
+                // as base, we can insert the row.
+                self.t_base[state] = base;
+                try self.used_base.put(self.allocator, base, {});
+                const size_to_ensure = base + sort_entry.max_terminal + 1;
+                const size_to_extend = size_to_ensure -| n;
+                try self.t_action.appendNTimes(self.allocator, .empty, size_to_extend);
+                // Now fill in the action table.
+                self.t_default[state] = self.backend.rowDefault(state);
+                {
+                    var it: Backend.ExceptionIterator = self.backend.rowExceptions(state);
+                    while (it.next()) |action_entry| {
+                        const i = base + action_entry.check;
+                        std.debug.assert(self.t_action.items[i].check == ActionEntry.empty_check);
+                        self.t_action.items[i] = action_entry;
                     }
                 }
             }
-            // This candidate works!
-            base = candidate;
-            break;
         }
-        // Once we've found a spot, or we've decided no existing offset works
-        // as base, we can insert the row.
-        t_base[state] = base;
-        try used_base.put(scrap_allocator, base, {});
-        const size_to_ensure = base + max_term + 1;
-        const size_to_extend = size_to_ensure -| n;
-        try t_action.appendNTimes(scrap_allocator, .empty, size_to_extend);
-        // Now fill in the action table.
-        for (row.shifts.items) |shift| {
-            const i = base + shift.terminal;
-            t_action.items[i] = .{
-                .check = shift.terminal,
-                .action = if (shift.terminal == symbol_spec.terminals.eoi) .accept else .{ .shift = shift.state },
-            };
-        }
-        for (row.reduces.items) |reduce_group| {
-            for (reduce_group.lookaheads) |terminal| {
-                const i = base + terminal;
-                t_action.items[i] = .{
-                    .check = terminal,
-                    .action = .{ .reduce = reduce_group.production },
-                };
+
+        fn emit(self: *@This(), emitter: *ZigEmitter) std.Io.Writer.Error!void {
+            // Table calculated; proceed to table emission.
+            try emitter.writeLine("const Packed = struct {");
+            emitter.indent(); // struct Packed
+            // Elements in base are offsets into action.
+            const action_len = self.t_action.items.len;
+            const action_bits = if (action_len == 0) 0 else std.math.log2_int_ceil(usize, action_len);
+            try emitter.printLine("const Offset = u{};", .{action_bits});
+
+            try emitter.writeIndent();
+            try emitter.out.writeAll("const base = [_]?Offset{");
+            for (self.t_base) |offset| {
+                if (offset == no_row) {
+                    try emitter.out.writeAll("null,");
+                } else {
+                    // This is the idea, but will not compile since we used ceil, so left
+                    // shift can overflow:
+                    // std.debug.assert(offset < @shlExact(@as(usize, 1), action_bits));
+                    try emitter.out.print("{},", .{offset});
+                }
             }
+            try emitter.out.writeAll("};\n");
+
+            const production_bits = if (self.productions.count == 0) 0 else std.math.log2_int_ceil(u32, self.productions.count);
+            try emitter.printLine("const ProductionSize = u{};", .{production_bits});
+            try emitter.writeLines(
+                \\const CompactAction = union(enum) {
+                \\    shift: StateSize,
+                \\    reduce: ProductionSize,
+                \\    accept,
+                \\    reject,
+                \\
+                \\    fn toNonCompact(self: @This()) Action {
+                \\        return switch (self) {
+                \\            .accept => .accept,
+                \\            .reject => .reject,
+                \\            .shift => |new_state| .{.shift = new_state},
+                \\            .reduce => |p| .{.reduce = .{.rhs_len = rhs_len[p], .lhs = lhs[p]}},
+                \\        };
+                \\    }
+                // \\
+                // \\    fn debugPrint(self: @This()) void {
+                // \\        switch (self) {
+                // \\            .accept => std.debug.print("accept", .{}),
+                // \\            .shift => |s| std.debug.print("shift {}", .{s}),
+                // \\            .reduce => |r| std.debug.print("reduce {}", .{r}),
+                // \\            .reject => std.debug.print("reject", .{}),
+                // \\        }
+                // \\    }
+                \\};
+            );
+
+            // To avoid collision with action() method:
+            try emitter.writeIndent();
+            try emitter.out.writeAll("const action_ = [_]CompactAction{");
+            for (self.t_action.items) |entry| {
+                if (entry.check == ActionEntry.empty_check) {
+                    try emitter.out.writeAll("undefined");
+                } else {
+                    try entry.action.emit(emitter);
+                }
+                try emitter.out.writeByte(',');
+            }
+            try emitter.out.writeAll("};\n");
+
+            try emitter.writeIndent();
+            try emitter.out.writeAll("const default = [_]CompactAction{");
+            for (self.t_default) |action| {
+                try action.emit(emitter);
+                try emitter.out.writeByte(',');
+            }
+            try emitter.out.writeAll("};\n");
+
+            try emitter.writeIndent();
+            try emitter.out.writeAll("const check = [_]?Token.TagSize{");
+            for (self.t_action.items) |entry| {
+                if (entry.check == ActionEntry.empty_check) {
+                    try emitter.out.writeAll("null,");
+                } else {
+                    try emitter.out.print("{},", .{entry.check});
+                }
+            }
+            try emitter.out.writeAll("};\n");
+
+            // We need additional tables for production LHS and RHS count
+            try emitter.writeIndent();
+            try emitter.out.writeAll("const lhs = [_]NtSize{");
+            for (self.productions.lhs[0..self.productions.count]) |lhs| {
+                try emitter.out.print("{},", .{lhs});
+            }
+            try emitter.out.writeAll("};\n");
+            try emitter.writeIndent();
+            try emitter.out.writeAll("const rhs_len = [_]RhsLenSize{");
+            for (self.productions.rhs[0..self.productions.count]) |rhs| {
+                try emitter.out.print("{},", .{rhs.len});
+            }
+            try emitter.out.writeAll("};\n");
+            emitter.dedent(); // end struct Packed
+            try emitter.writeLine("};");
+
+            // Tables emitted, now comes lookup logic
+            // Be very careful with integer overflow.
+            try emitter.implementAction();
+            try emitter.writeLines(
+                // \\std.debug.print("state: {} lookahead: {} ", .{state, lookahead});
+                // \\defer std.debug.print("\n", .{});
+                \\if (Packed.base[state]) |B| {
+                \\    const I = B + lookahead;
+                \\    if (Packed.check[I]) |expected_column| {
+                \\        if (expected_column == lookahead) {
+                // \\            Packed.action_[I].debugPrint();
+                \\            return Packed.action_[I].toNonCompact();
+                \\        }
+                \\    }
+                \\}
+                // \\Packed.default[state].debugPrint();
+                \\return Packed.default[state].toNonCompact();
+            );
+            try emitter.endMethod();
         }
-    }
-
-    // Table calculated; proceed to table emission.
-    try emitter.writeLine("const Packed = struct {");
-    emitter.indent(); // struct Packed
-    // Elements in base are offsets into action.
-    const action_len = t_action.items.len;
-    const action_bits = if (action_len == 0) 0 else std.math.log2_int_ceil(usize, action_len);
-    try emitter.printLine("const Offset = u{};", .{action_bits});
-
-    try emitter.writeIndent();
-    try emitter.out.writeAll("const base = [_]?Offset{");
-    for (t_base) |offset| {
-        if (offset == no_row) {
-            try emitter.out.writeAll("null,");
-        } else {
-            // This is the idea, but will not compile since we used ceil, so left
-            // shift can overflow:
-            // std.debug.assert(offset < @shlExact(@as(usize, 1), action_bits));
-            try emitter.out.print("{},", .{offset});
-        }
-    }
-    try emitter.out.writeAll("};\n");
-
-    const production_bits = if (productions.count == 0) 0 else std.math.log2_int_ceil(u32, productions.count);
-    try emitter.printLine("const ProductionSize = u{};", .{production_bits});
-    try emitter.writeLines(
-        \\const CompactAction = union(enum) {
-        \\    shift: StateSize,
-        \\    reduce: ProductionSize,
-        \\    accept,
-        \\
-        \\    fn toNonCompact(self: @This()) Action {
-        \\        return switch (self) {
-        \\            .accept => .accept,
-        \\            .shift => |new_state| .{.shift = new_state},
-        \\            .reduce => |p| .{.reduce = .{.rhs_len = rhs_len[p], .lhs = lhs[p]}},
-        \\        };
-        \\    }
-        \\};
-    );
-
-    // To avoid collision with action() method:
-    try emitter.writeIndent();
-    try emitter.out.writeAll("const action_ = [_]CompactAction{");
-    for (t_action.items) |entry| {
-        if (entry.check == ActionEntry.empty_check) {
-            try emitter.out.writeAll("undefined");
-        } else switch (entry.action) {
-            .accept => {
-                @branchHint(.unlikely);
-                try emitter.out.writeAll(".accept");
-            },
-            .reduce => |prod_id| {
-                try emitter.out.print(".{{.reduce={}}}", .{prod_id});
-            },
-            .shift => |new_state| {
-                try emitter.out.print(".{{.shift={}}}", .{new_state});
-            },
-        }
-        try emitter.out.writeByte(',');
-    }
-    try emitter.out.writeAll("};\n");
-
-    try emitter.writeIndent();
-    try emitter.out.writeAll("const check = [_]?Token.TagSize{");
-    for (t_action.items) |entry| {
-        if (entry.check == ActionEntry.empty_check) {
-            try emitter.out.writeAll("null,");
-        } else {
-            try emitter.out.print("{},", .{entry.check});
-        }
-    }
-    try emitter.out.writeAll("};\n");
-
-    // We need additional tables for production LHS and RHS count
-    try emitter.writeIndent();
-    try emitter.out.writeAll("const lhs = [_]NtSize{");
-    for (productions.lhs[0..productions.count]) |lhs| {
-        try emitter.out.print("{},", .{lhs});
-    }
-    try emitter.out.writeAll("};\n");
-    try emitter.writeIndent();
-    try emitter.out.writeAll("const rhs_len = [_]RhsLenSize{");
-    for (productions.rhs[0..productions.count]) |rhs| {
-        try emitter.out.print("{},", .{rhs.len});
-    }
-    try emitter.out.writeAll("};\n");
-    emitter.dedent(); // end struct Packed
-    try emitter.writeLine("};");
-
-    // Tables emitted, now comes lookup logic
-    // Be very careful with integer overflow.
-    try emitter.implementAction();
-    try emitter.writeLines(
-        //\\std.debug.print("state: {} lookahead: {} ", .{state, lookahead});
-        \\if (Packed.base[state]) |B| {
-        \\    const I = B + lookahead;
-        \\    if (Packed.check[I]) |expected_column| {
-        \\        if (expected_column == lookahead) {
-        //\\            switch (Packed.action_[I]) {
-        //\\            .accept => std.debug.print("accept\n", .{}),
-        //\\            .shift => |s| std.debug.print("shift {}\n", .{s}),
-        //\\            .reduce => |r| std.debug.print("reduce {}\n", .{r}),
-        //\\            }
-        \\            return Packed.action_[I].toNonCompact();
-        \\        }
-        \\    }
-        \\}
-        //\\std.debug.print("reject\n", .{});
-        \\return .reject;
-    );
-    try emitter.endMethod();
+    };
 }
 
 /// Specialized `ActionHandler(void)`.
