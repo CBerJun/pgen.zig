@@ -54,8 +54,9 @@ pub fn main(init: std.process.Init) !u8 {
 }
 
 const OverflowError = error{
-    /// Either at tokenization stage or at parsing/evaluation stage
-    IntegerOverflow,
+    /// Either at tokenization stage or at parsing/evaluation stage,
+    /// matching the standard error name used by std.math.* functions
+    Overflow,
 };
 
 /// Integer type used during expression calculation.
@@ -93,13 +94,8 @@ const Tokenizer = struct {
                     };
                     if (std.ascii.isDigit(char)) {
                         self.reader.toss(1);
-                        const x, const overflow1 = @mulWithOverflow(num, 10);
-                        if (overflow1 > 0)
-                            return error.IntegerOverflow;
-                        const y, const overflow2 = @addWithOverflow(x, char - '0');
-                        if (overflow2 > 0)
-                            return error.IntegerOverflow;
-                        num = y;
+                        const x = try std.math.mul(Int, num, 10);
+                        num = try std.math.add(Int, x, char - '0');
                     } else {
                         break;
                     }
@@ -133,6 +129,7 @@ const Tokenizer = struct {
 // which computes the result for the expression.
 const Evaluator = struct {
     pub const Error = OverflowError || error{
+        /// Matches std.math.div* error names
         DivisionByZero,
     };
 
@@ -148,13 +145,11 @@ const Evaluator = struct {
             // Literal tokens are named in the form @"suffix.string" in Zig.
             // Since our literal tokens have empty suffix, they start with ".".
             const operand = try self.evalTerm(it.eat().*);
-            value, const overflow = switch (operator_token.tag) {
-                .@".+" => @addWithOverflow(value, operand),
-                .@".-" => @subWithOverflow(value, operand),
+            value = try switch (operator_token.tag) {
+                .@".+" => std.math.add(Int, value, operand),
+                .@".-" => std.math.sub(Int, value, operand),
                 else => unreachable,
             };
-            if (overflow > 0)
-                return Error.IntegerOverflow;
         }
         return value;
     }
@@ -167,24 +162,11 @@ const Evaluator = struct {
         while (it.next()) |operator_node| {
             const operator_token = operator_node.leaf;
             const operand = try self.evalUnary(it.eat().*);
-            switch (operator_token.tag) {
-                .@".*" => {
-                    value, const overflow = @mulWithOverflow(value, operand);
-                    if (overflow > 0) {
-                        return Error.IntegerOverflow;
-                    }
-                },
-                .@"./" => {
-                    if (operand == 0) {
-                        return Error.DivisionByZero;
-                    }
-                    if (value == std.math.minInt(Int) and operand == -1) {
-                        return Error.IntegerOverflow;
-                    }
-                    value = @divFloor(value, operand);
-                },
+            value = try switch (operator_token.tag) {
+                .@".*" => std.math.mul(Int, value, operand),
+                .@"./" => std.math.divFloor(Int, value, operand),
                 else => unreachable,
-            }
+            };
         }
         return value;
     }
@@ -194,10 +176,7 @@ const Evaluator = struct {
         if (cst.internal.children.len == 2) {
             // Has negative sign
             const n = try self.evalFactor(cst.internal.children[1]);
-            if (n == std.math.minInt(Int)) {
-                return Error.IntegerOverflow;
-            }
-            return -n;
+            return std.math.negate(n);
         } else {
             return self.evalFactor(cst.internal.children[0]);
         }
