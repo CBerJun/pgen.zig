@@ -9,8 +9,8 @@ entry expr;
 
 # + and - connects terms.
 expr: term (("+" | "-") term)*;
-# * and / connects factors and thus has higher precedence.
-term: unary (("*" | "/") unary)*;
+# *, % and / connects factors and thus has higher precedence.
+term: unary (("*" | "/" | "%") unary)*;
 # unary - operator
 unary: ["-"] factor;
 # A parenthesized expression is treated as a single factor. A single integer

@@ -131,6 +131,8 @@ const Evaluator = struct {
     pub const Error = OverflowError || error{
         /// Matches std.math.div* error names
         DivisionByZero,
+        /// Used by std.math.mod
+        NegativeDenominator,
     };
 
     pub fn evalExpr(self: @This(), cst: parser_mod.CstNode) Error!Int {
@@ -164,7 +166,9 @@ const Evaluator = struct {
             const operand = try self.evalUnary(it.eat().*);
             value = try switch (operator_token.tag) {
                 .@".*" => std.math.mul(Int, value, operand),
+                // Follow Python style divFloor+mod instead of C style divTrunc+rem
                 .@"./" => std.math.divFloor(Int, value, operand),
+                .@".%" => std.math.mod(Int, value, operand),
                 else => unreachable,
             };
         }
