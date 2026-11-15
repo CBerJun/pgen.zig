@@ -77,7 +77,67 @@ To build the in-browser demo you need Python (3.10+). Just run `demo/build.py` f
 
 ## Technical documentation
 
+### The input and output
+
 As a parser generator, pgen.zig reads in a stream of *tokens* and emits a *parse tree* (*concrete syntax tree*, or *CST* in short). For instance, if your're making a programming language then each identifier (e.g. `foo`, `variable_name`, `functionName`), keyword, literal (`"string"` or `42`), and punctuation (e.g. `+`, `-`, `.`, `>=`) can be considered a token. Tokens are the smallest unit your grammar can handle, and it's up to you to define what kinds of tokens to use. All tokens have a *tag* which indicates its kind (e.g. keyword/number/string/...). The CST has a tree structure, and it's easier to see an example than explaining it with words.
+
+Consider a small calculator syntax example (you can see the [working calculator's grammar](./examples/calculator/src/grammar.txt)). The token tags include:
+
+* `INTEGER`, representing any integer the user types, with an additional payload that records which integer the user supplies.
+* Other punctuations delimited by double quotes, such as `"+"`, `"-"`, `"("`, `")"`, etc. They don't need an additional payload.
+
+The grammar file specifies to pgen.zig which token streams are valid and which are not. E.g. pgen.zig will accept `1+2` but not `1+`, `(1`, or anything that does not conform to the grammar given.
+
+However, pgen.zig does not try to interpret the *semantics* of your grammar. So it will not calculate a result for you, because that's not the job of a parser. pgen.zig outputs a CST for you to further process.
+
+For `(1+2)*-3`, the tree looks like this visually:
+
+```text
+expr
+- term
+  - unary
+    - factor
+      - "("
+      - expr
+        - term
+          - unary
+            - factor
+              - INTEGER (1)
+        - "+"
+        - term
+          - unary
+            - factor
+              - INTEGER (2)
+      - ")"
+  - "*"
+  - unary
+    - "-"
+    - factor
+      - INTEGER (3)
+```
+
+In practice you will receive a nested data structure that resembles the visual image of the tree above. The tree typically has individual tokens as its leaves, and each syntactical element (*nonterminal* to be precise, see below; they're also declared by you) as an internal node. The root of the tree is a single node, the *entry* syntactical element.
+
+You can then do a DFS on the tree to compute the result at each node.
+
+Note that the input to pgen.zig is a stream of tokens, so you'll have to give pgen.zig
+
+```text
+"("
+INTEGER (1)
+"+"
+INTEGER (2)
+")"
+"*"
+"-"
+INTEGER (3)
+```
+
+instead of the string `(1+2)*-3`. The process of converting the string into a sequence of tokens is called *tokenizing*, and you have to supply that step yourself. It is therefore up to you to decide whether `( 1 + 2) * - 3` also gives the same result. If you want comments, typically they are stripped away during tokenization, too.
+
+You can check out how the calculator example's tokenizer and evaluator (which computes the result from the tree) work in [its source code](./examples/calculator/src/main.zig).
+
+For anyone who is familiar with a *syntax-directed translation* parser generator (like Bison): pgen.zig is not syntax-directed and it always gives you a tree to work with instead of executing semantic actions along the way.
 
 ### The grammar file
 
