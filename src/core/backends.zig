@@ -1025,24 +1025,29 @@ fn Packer(comptime Backend: type) type {
         /// `action` and `check` arrays combined.
         t_action: std.ArrayList(ActionEntry),
         /// Base of each row in compact `t_action`, or `no_row` if it's always
-        /// the default action.
-        t_base: []usize,
+        /// the default action. The base can be negative, in which case if the
+        /// state+terminal index is negative, the default action is invoked.
+        t_base: []Offset,
         /// Default action in each state
         /// TODO: substantial defaults are going to be rejects?
         t_default: []CompactAction,
         /// Used base may not be reused unless two rows are exactly identical
         /// TODO: replace with a growing bitset?
-        used_base: std.AutoHashMapUnmanaged(usize, void),
+        used_base: std.AutoHashMapUnmanaged(Offset, void),
         /// The lowest base that is unoccupied (lowest `i` such that
         /// `t_action[i].isEmpty()`, or length of `t_action` if no such `i`
-        /// exists)
-        low_zero: usize,
+        /// exists). This is always nonnegative.
+        low_zero: Offset,
+        /// The maximum base (synced to the maximum in `used_base`)
+        max_base: Offset,
         /// Allocator for storing generated tables
         allocator: std.mem.Allocator,
 
+        const Offset = isize;
+
         fn init(symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, backend: *Backend, allocator: std.mem.Allocator) std.mem.Allocator.Error!@This() {
             const num_states = backend.numStates();
-            const t_base = try allocator.alloc(usize, num_states);
+            const t_base = try allocator.alloc(Offset, num_states);
             const t_default = try allocator.alloc(CompactAction, num_states);
             return .{
                 .symbol_spec = symbol_spec,
@@ -1054,6 +1059,7 @@ fn Packer(comptime Backend: type) type {
                 .t_default = t_default,
                 .used_base = .empty,
                 .low_zero = 0,
+                .max_base = std.math.minInt(Offset),
                 .allocator = allocator,
             };
         }
@@ -1139,7 +1145,7 @@ fn Packer(comptime Backend: type) type {
         };
 
         // base[i] = no_row => No base offset; always use default action.
-        const no_row = std.math.maxInt(usize);
+        const no_row = std.math.minInt(Offset);
 
         fn makePack(self: *@This()) std.mem.Allocator.Error!void {
             // Collect basic info on each row (first pass)
@@ -1171,12 +1177,13 @@ fn Packer(comptime Backend: type) type {
                 }
                 // Find a spot in action table to insert the row (greedy).
                 const n = self.t_action.items.len;
-                // Base defaults to n, when no candidate in 0..n works.
-                var base: usize = n;
+                // Base defaults to n, when no candidate below n works.
+                var base: Offset = @intCast(n);
                 // Anything candidate before that must fail.
-                // TODO: negative base support?
-                const min_candidate = self.low_zero -| sort_entry.min_terminal;
-                candidate_check: for (min_candidate..n) |candidate| {
+                const min_candidate = self.low_zero - sort_entry.min_terminal;
+                var candidate: Offset = min_candidate;
+                // Cannot use range since candidate can be negative.
+                candidate_check: while (candidate < @as(isize, @intCast(n))) : (candidate += 1) {
                     if (self.used_base.get(candidate) != null) {
                         // TODO: identical rows can share a base
                         continue;
@@ -1184,7 +1191,7 @@ fn Packer(comptime Backend: type) type {
                     var it: Backend.ExceptionIterator = self.backend.rowExceptions(state);
                     while (it.next()) |action_entry| {
                         const i = candidate + action_entry.check;
-                        if (i < n and !self.t_action.items[i].isEmpty()) {
+                        if (0 < i and i < n and !self.t_action.items[@intCast(i)].isEmpty()) {
                             continue :candidate_check;
                         }
                     }
@@ -1196,8 +1203,10 @@ fn Packer(comptime Backend: type) type {
                 // as base, we can insert the row.
                 self.t_base[state] = base;
                 try self.used_base.put(self.allocator, base, {});
+                self.max_base = @max(self.max_base, base);
                 const size_to_ensure = base + sort_entry.max_terminal + 1;
-                const size_to_extend = size_to_ensure -| n;
+                std.debug.assert(size_to_ensure > 0);
+                const size_to_extend = @as(usize, @intCast(size_to_ensure)) -| n;
                 try self.t_action.appendNTimes(self.allocator, .empty, size_to_extend);
                 // Now fill in the action table.
                 self.t_default[state] = self.backend.rowDefault(state);
@@ -1205,12 +1214,13 @@ fn Packer(comptime Backend: type) type {
                     var it: Backend.ExceptionIterator = self.backend.rowExceptions(state);
                     while (it.next()) |action_entry| {
                         const i = base + action_entry.check;
-                        std.debug.assert(self.t_action.items[i].isEmpty());
-                        self.t_action.items[i] = action_entry;
+                        std.debug.assert(i >= 0);
+                        std.debug.assert(self.t_action.items[@intCast(i)].isEmpty());
+                        self.t_action.items[@intCast(i)] = action_entry;
                     }
                 }
                 // Update low_zero if some cells become occupied.
-                while (self.low_zero < self.t_action.items.len and !self.t_action.items[self.low_zero].isEmpty()) {
+                while (@as(usize, @intCast(self.low_zero)) < self.t_action.items.len and !self.t_action.items[@intCast(self.low_zero)].isEmpty()) {
                     self.low_zero += 1;
                 }
             }
@@ -1220,10 +1230,19 @@ fn Packer(comptime Backend: type) type {
             // Table calculated; proceed to table emission.
             try emitter.writeLine("const Packed = struct {");
             emitter.indent(); // struct Packed
-            // Elements in base are offsets into action.
+            // The runtime `Offset` type must be able to hold:
+            // - A minimum of -total_terminals
+            // - A maximum of maximum base + total_terminals
+            const extreme_offset = @max(0, self.max_base) + self.symbol_spec.terminals.count;
+            std.debug.assert(extreme_offset > 0);
+            // iN range is [-2**(i-1), 2**(i-1))
+            // Note the two "+1":
+            const offset_bits = 1 + std.math.log2_int_ceil(usize, @as(usize, @intCast(extreme_offset)) + 1);
+            try emitter.printLine("const Offset = i{};", .{offset_bits});
+
             const action_len = self.t_action.items.len;
             const action_bits = if (action_len == 0) 0 else std.math.log2_int_ceil(usize, action_len);
-            try emitter.printLine("const Offset = u{};", .{action_bits});
+            try emitter.printLine("const ActionIndex = u{};", .{action_bits});
 
             try emitter.writeIndent();
             try emitter.out.writeAll("const base = [_]?Offset{");
@@ -1323,11 +1342,14 @@ fn Packer(comptime Backend: type) type {
                 // \\std.debug.print("state: {} lookahead: {} ", .{state, lookahead});
                 // \\defer std.debug.print("\n", .{});
                 \\if (Packed.base[state]) |B| {
-                \\    const I = B + lookahead;
-                \\    if (Packed.check[I]) |expected_column| {
-                \\        if (expected_column == lookahead) {
-                // \\            Packed.action_[I].debugPrint();
-                \\            return Packed.action_[I].toNonCompact();
+                \\    const I_signed = B + lookahead;
+                \\    if (I_signed >= 0 and I_signed < Packed.check.len) {
+                \\        const I: Packed.ActionIndex = @intCast(I_signed);
+                \\        if (Packed.check[I]) |expected_column| {
+                \\            if (expected_column == lookahead) {
+                // \\                Packed.action_[I].debugPrint();
+                \\                return Packed.action_[I].toNonCompact();
+                \\            }
                 \\        }
                 \\    }
                 \\}
