@@ -723,52 +723,9 @@ pub const Lr0SwitchBackend = struct {
     }
     pub fn endTableGen(self: *@This()) Error!void {
         try self.emitter.writeProlog(self.symbol_spec, self.productions);
-        try self.emitter.implementAction();
-        try self.emitter.writeLine("return switch (state) {");
-        self.emitter.indent(); // outer switch
+        try lr0ActionTableToActionMethodSwitch(&self.emitter, self.symbol_spec, self.productions, self.action_table.items);
         const num_states: u32 = @intCast(self.states.?.items.len);
-        const state_bits = self.emitter.stateBits(num_states);
-        const tag_bits = self.emitter.tagBackingIntBits(self.symbol_spec);
-        for (0..num_states) |state| {
-            const action_row = self.action_table.items[state];
-            try self.emitter.writeIndent();
-            try self.emitter.out.print("{} => ", .{state});
-            switch (action_row) {
-                .reject => {
-                    try self.emitter.out.writeAll(".reject");
-                },
-                .reduce => |prod_id| {
-                    try self.emitter.writeReduceAction(self.productions, prod_id);
-                },
-                .shift => |shifts| {
-                    try self.emitter.out.writeAll("switch (lookahead) {");
-                    for (shifts.items) |entry| {
-                        try self.emitter.out.print("{} => ", .{entry.terminal});
-                        if (entry.terminal == self.symbol_spec.terminals.eoi) { // Accept
-                            @branchHint(.unlikely);
-                            try self.emitter.out.writeAll(".accept");
-                        } else {
-                            try self.emitter.writeShiftAction(entry.new_state);
-                        }
-                        try self.emitter.out.writeAll(", ");
-                    }
-                    // Zig disallows extraneous else prong
-                    if (shifts.items.len < (@as(usize, 1) << @intCast(tag_bits))) {
-                        try self.emitter.out.writeAll("else => .reject");
-                    }
-                    try self.emitter.out.writeAll("}");
-                },
-            }
-            try self.emitter.out.writeAll(",\n");
-        }
-        // Zig disallows extraneous else prong
-        if (num_states < (@as(usize, 1) << @intCast(state_bits))) {
-            try self.emitter.writeLine("else => unreachable");
-        }
-        self.emitter.dedent(); // end outer switch
-        try self.emitter.writeLine("};");
-        try self.emitter.endMethod();
-        try self.goto_handler.writeGotoMethod(&self.emitter, self.symbol_spec, @intCast(num_states));
+        try self.goto_handler.writeGotoMethod(&self.emitter, self.symbol_spec, num_states);
         try self.emitter.writeEpilog(num_states);
     }
 
@@ -785,6 +742,49 @@ pub const Lr0SwitchBackend = struct {
         };
     }
 };
+
+fn lr0ActionTableToActionMethodSwitch(emitter: *ZigEmitter, symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, actions: []Lr0ActionRow) std.Io.Writer.Error!void {
+    try emitter.implementAction();
+    try emitter.writeLine("return switch (state) {");
+    emitter.indent(); // outer switch
+    const num_states: u32 = @intCast(actions.len);
+    const state_bits = emitter.stateBits(num_states);
+    const tag_bits = emitter.tagBackingIntBits(symbol_spec);
+    for (actions, 0..) |action_row, state| {
+        try emitter.writeIndent();
+        try emitter.out.print("{} => ", .{state});
+        switch (action_row) {
+            .reject => try emitter.out.writeAll(".reject"),
+            .reduce => |prod_id| try emitter.writeReduceAction(productions, prod_id),
+            .shift => |shifts| {
+                try emitter.out.writeAll("switch (lookahead) {");
+                for (shifts.items) |entry| {
+                    try emitter.out.print("{} => ", .{entry.terminal});
+                    if (entry.terminal == symbol_spec.terminals.eoi) { // Accept
+                        @branchHint(.unlikely);
+                        try emitter.out.writeAll(".accept");
+                    } else {
+                        try emitter.writeShiftAction(entry.new_state);
+                    }
+                    try emitter.out.writeAll(", ");
+                }
+                // Zig disallows extraneous else prong
+                if (shifts.items.len < (@as(usize, 1) << @intCast(tag_bits))) {
+                    try emitter.out.writeAll("else => .reject");
+                }
+                try emitter.out.writeAll("}");
+            },
+        }
+        try emitter.out.writeAll(",\n");
+    }
+    // Zig disallows extraneous else prong
+    if (num_states < (@as(usize, 1) << @intCast(state_bits))) {
+        try emitter.writeLine("else => unreachable");
+    }
+    emitter.dedent(); // end outer switch
+    try emitter.writeLine("};");
+    try emitter.endMethod();
+}
 
 /// A single (valid) action in a LR-style ACTION table.
 pub const Action = union(enum) {
