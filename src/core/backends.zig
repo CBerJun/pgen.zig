@@ -1033,6 +1033,10 @@ fn Packer(comptime Backend: type) type {
         /// Used base may not be reused unless two rows are exactly identical
         /// TODO: replace with a growing bitset?
         used_base: std.AutoHashMapUnmanaged(usize, void),
+        /// The lowest base that is unoccupied (lowest `i` such that
+        /// `t_action[i].isEmpty()`, or length of `t_action` if no such `i`
+        /// exists)
+        low_zero: usize,
         /// Allocator for storing generated tables
         allocator: std.mem.Allocator,
 
@@ -1049,6 +1053,7 @@ fn Packer(comptime Backend: type) type {
                 .t_base = t_base,
                 .t_default = t_default,
                 .used_base = .empty,
+                .low_zero = 0,
                 .allocator = allocator,
             };
         }
@@ -1122,11 +1127,15 @@ fn Packer(comptime Backend: type) type {
             /// cell; `action` is undefined in that case.
             check: u32,
 
-            pub const empty_check = std.math.maxInt(u32);
-            pub const empty: @This() = .{
+            const empty_check = std.math.maxInt(u32);
+            const empty: @This() = .{
                 .action = undefined,
                 .check = empty_check,
             };
+
+            fn isEmpty(self: @This()) bool {
+                return self.check == empty_check;
+            }
         };
 
         // base[i] = no_row => No base offset; always use default action.
@@ -1164,7 +1173,10 @@ fn Packer(comptime Backend: type) type {
                 const n = self.t_action.items.len;
                 // Base defaults to n, when no candidate in 0..n works.
                 var base: usize = n;
-                candidate_check: for (0..n) |candidate| {
+                // Anything candidate before that must fail.
+                // TODO: negative base support?
+                const min_candidate = self.low_zero -| sort_entry.min_terminal;
+                candidate_check: for (min_candidate..n) |candidate| {
                     if (self.used_base.get(candidate) != null) {
                         // TODO: identical rows can share a base
                         continue;
@@ -1172,7 +1184,7 @@ fn Packer(comptime Backend: type) type {
                     var it: Backend.ExceptionIterator = self.backend.rowExceptions(state);
                     while (it.next()) |action_entry| {
                         const i = candidate + action_entry.check;
-                        if (i < n and self.t_action.items[i].check != ActionEntry.empty_check) {
+                        if (i < n and !self.t_action.items[i].isEmpty()) {
                             continue :candidate_check;
                         }
                     }
@@ -1193,9 +1205,13 @@ fn Packer(comptime Backend: type) type {
                     var it: Backend.ExceptionIterator = self.backend.rowExceptions(state);
                     while (it.next()) |action_entry| {
                         const i = base + action_entry.check;
-                        std.debug.assert(self.t_action.items[i].check == ActionEntry.empty_check);
+                        std.debug.assert(self.t_action.items[i].isEmpty());
                         self.t_action.items[i] = action_entry;
                     }
+                }
+                // Update low_zero if some cells become occupied.
+                while (self.low_zero < self.t_action.items.len and !self.t_action.items[self.low_zero].isEmpty()) {
+                    self.low_zero += 1;
                 }
             }
         }
@@ -1256,7 +1272,7 @@ fn Packer(comptime Backend: type) type {
             try emitter.writeIndent();
             try emitter.out.writeAll("const action_ = [_]CompactAction{");
             for (self.t_action.items) |entry| {
-                if (entry.check == ActionEntry.empty_check) {
+                if (entry.isEmpty()) {
                     try emitter.out.writeAll("undefined");
                 } else {
                     try entry.action.emit(emitter);
@@ -1276,7 +1292,7 @@ fn Packer(comptime Backend: type) type {
             try emitter.writeIndent();
             try emitter.out.writeAll("const check = [_]?Token.TagSize{");
             for (self.t_action.items) |entry| {
-                if (entry.check == ActionEntry.empty_check) {
+                if (entry.isEmpty()) {
                     try emitter.out.writeAll("null,");
                 } else {
                     try emitter.out.print("{},", .{entry.check});
