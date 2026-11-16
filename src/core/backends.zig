@@ -1239,17 +1239,19 @@ fn Packer(comptime Backend: type) type {
                 // Base defaults to n, when no candidate below n works.
                 var base: Offset = @intCast(n);
                 // Anything candidate before that must fail.
-                const min_candidate = self.low_zero - sort_entry.min_terminal;
+                // The @intCast is necessary on 32-bit platforms:
+                const min_candidate = self.low_zero - @as(Offset, @intCast(sort_entry.min_terminal));
                 var candidate: Offset = min_candidate;
                 // Cannot use range since candidate can be negative.
-                candidate_check: while (candidate < @as(isize, @intCast(n))) : (candidate += 1) {
+                candidate_check: while (candidate < @as(Offset, @intCast(n))) : (candidate += 1) {
                     if (self.used_base.get(candidate) != null) {
                         // TODO: identical rows can share a base
                         continue;
                     }
                     var it: Backend.ExceptionIterator = self.backend.rowExceptions(state);
                     while (it.next()) |action_entry| {
-                        const i = candidate + action_entry.check;
+                        // The @intCast is necessary on 32-bit platforms:
+                        const i = candidate + @as(Offset, @intCast(action_entry.check));
                         if (0 < i and i < n and !self.t_action.items[@intCast(i)].isEmpty()) {
                             continue :candidate_check;
                         }
@@ -1263,7 +1265,8 @@ fn Packer(comptime Backend: type) type {
                 self.t_base[state] = base;
                 try self.used_base.put(self.allocator, base, {});
                 self.max_base = @max(self.max_base, base);
-                const size_to_ensure = base + sort_entry.max_terminal + 1;
+                // The @intCast is necessary on 32-bit platforms:
+                const size_to_ensure = base + @as(Offset, @intCast(sort_entry.max_terminal)) + 1;
                 std.debug.assert(size_to_ensure > 0);
                 const size_to_extend = @as(usize, @intCast(size_to_ensure)) -| n;
                 try self.t_action.appendNTimes(self.allocator, .empty, size_to_extend);
@@ -1271,7 +1274,7 @@ fn Packer(comptime Backend: type) type {
                 {
                     var it: Backend.ExceptionIterator = self.backend.rowExceptions(state);
                     while (it.next()) |action_entry| {
-                        const i = base + action_entry.check;
+                        const i = base + @as(Offset, @intCast(action_entry.check));
                         std.debug.assert(i >= 0);
                         std.debug.assert(self.t_action.items[@intCast(i)].isEmpty());
                         self.t_action.items[@intCast(i)] = action_entry;
