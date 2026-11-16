@@ -70,7 +70,7 @@ pub const ZigEmitter = struct {
     node_count_bits: u16 = 0,
     /// Indentation preference (Zig recommends 4 spaces)
     /// TODO: expose this to end user?
-    indent_string: []const u8 = "  ",
+    indent_string: []const u8 = "    ",
 
     // --- Utility writer routines
     /// Current indent level
