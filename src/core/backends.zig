@@ -723,7 +723,8 @@ pub const Lr0SwitchBackend = struct {
     }
     pub fn endTableGen(self: *@This()) Error!void {
         try self.emitter.writeProlog(self.symbol_spec, self.productions);
-        try lr0ActionTableToActionMethodSwitch(&self.emitter, self.symbol_spec, self.productions, self.action_table.items);
+        // try lr0ActionTableToActionMethodSwitch(&self.emitter, self.symbol_spec, self.productions, self.action_table.items);
+        try lr0ActionTableToActionMethodPacked(&self.emitter, self.symbol_spec, self.productions, self.action_table.items, self.allocator);
         const num_states: u32 = @intCast(self.states.?.items.len);
         try self.goto_handler.writeGotoMethod(&self.emitter, self.symbol_spec, num_states);
         try self.emitter.writeEpilog(num_states);
@@ -785,6 +786,62 @@ fn lr0ActionTableToActionMethodSwitch(emitter: *ZigEmitter, symbol_spec: *const 
     try emitter.writeLine("};");
     try emitter.endMethod();
 }
+
+fn lr0ActionTableToActionMethodPacked(emitter: *ZigEmitter, symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, actions: []Lr0ActionRow, scrap_allocator: std.mem.Allocator) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
+    var backend: Lr0ActionTablePackerBackend = .{
+        .actions = actions,
+        .eoi = symbol_spec.terminals.eoi,
+    };
+    var packer = try Packer(Lr0ActionTablePackerBackend).init(symbol_spec, productions, &backend, scrap_allocator);
+    defer packer.deinit();
+    try packer.makePack();
+    try packer.emit(emitter);
+}
+
+const Lr0ActionTablePackerBackend = struct {
+    /// BORROWED action table
+    actions: []Lr0ActionRow,
+    /// EOI terminal ID
+    eoi: u32,
+
+    const ExceptionIterator = struct {
+        row: *const Lr0ActionRow,
+        /// `eoi` from the owner
+        eoi: u32,
+        /// Next index to return for `.shift` rows.
+        i: u32 = 0,
+
+        fn next(self: *@This()) ?Packer(Lr0ActionTablePackerBackend).ActionEntry {
+            return switch (self.row.*) {
+                // No exception when the entire row is the same action
+                .reduce, .reject => null,
+                .shift => |shifts| if (self.i == shifts.items.len) null else blk: {
+                    const s = shifts.items[self.i];
+                    self.i += 1;
+                    break :blk .{
+                        .check = s.terminal,
+                        .action = if (s.terminal == self.eoi) .accept else .{ .shift = s.new_state },
+                    };
+                },
+            };
+        }
+    };
+
+    fn numStates(self: @This()) u32 {
+        return @intCast(self.actions.len);
+    }
+
+    fn rowDefault(self: *@This(), state: u32) Packer(Lr0ActionTablePackerBackend).CompactAction {
+        return switch (self.actions[state]) {
+            .reduce => |production| .{ .reduce = production },
+            .reject, .shift => .reject,
+        };
+    }
+
+    fn rowExceptions(self: *@This(), state: u32) ExceptionIterator {
+        return .{ .row = &self.actions[state], .eoi = self.eoi };
+    }
+};
 
 /// A single (valid) action in a LR-style ACTION table.
 pub const Action = union(enum) {
@@ -942,7 +999,7 @@ const ActionTablePackerBackend = struct {
 
     const ExceptionIterator = struct {
         /// Corresponding row (borrowed)
-        action_row: *ActionRow,
+        action_row: *const ActionRow,
         /// EOI token ID from owner
         eoi: u32,
         /// In `shifts` or `reduce`?
@@ -1167,6 +1224,8 @@ fn Packer(comptime Backend: type) type {
             // Now pack the rows into arrays
             for (sort_entries) |sort_entry| {
                 const state = sort_entry.row;
+                // You always fill in the default action!
+                self.t_default[state] = self.backend.rowDefault(state);
                 if (sort_entry.isNoException()) {
                     // If row is empty (no exception), assign `no_row`. This is currently
                     // only possible with LR(0) which reduces for the entire row, or when
@@ -1209,7 +1268,6 @@ fn Packer(comptime Backend: type) type {
                 const size_to_extend = @as(usize, @intCast(size_to_ensure)) -| n;
                 try self.t_action.appendNTimes(self.allocator, .empty, size_to_extend);
                 // Now fill in the action table.
-                self.t_default[state] = self.backend.rowDefault(state);
                 {
                     var it: Backend.ExceptionIterator = self.backend.rowExceptions(state);
                     while (it.next()) |action_entry| {
