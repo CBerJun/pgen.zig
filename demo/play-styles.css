@@ -12,3 +12,7 @@
 #output-stderr {
     color: red;
 }
+
+#output-stdout {
+    text-wrap: wrap;
+}
