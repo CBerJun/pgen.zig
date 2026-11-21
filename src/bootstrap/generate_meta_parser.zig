@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
     var backend: pgen_core.backends.SlrBackend(
         // Meta parser currently does not need conflict resolution
         void,
-        pgen_core.backends.SwitchGotoHandler,
+        pgen_core.backends.PackerGotoHandler,
     ) = .{
         .emitter = .{
             .out = writer,

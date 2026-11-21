@@ -575,18 +575,19 @@ const Lr0ActionRow = union(enum) {
     }
 };
 
-/// A single cell in a GOTO table
-pub const GotoTableEntry = struct {
-    /// On seeing this nonterminal,
-    nonterminal: u32,
-    /// Transition to this new state
-    new_state: u32,
-};
-
 /// Handle GOTO using switch statements nested in a switch statement.
 pub const SwitchGotoHandler = struct {
     /// GOTO[state][nonterminal]
-    goto_table: std.ArrayList(std.ArrayList(GotoTableEntry)) = .empty,
+    goto_table: std.ArrayList(std.ArrayList(Entry)) = .empty,
+    num_states: u32 = 0,
+
+    /// A single cell in a GOTO table
+    const Entry = struct {
+        /// On seeing this nonterminal...
+        nonterminal: u32,
+        /// Transition to this new state.
+        new_state: u32,
+    };
 
     pub fn free(self: *@This(), allocator: std.mem.Allocator) void {
         for (self.goto_table.items) |*row| {
@@ -595,13 +596,15 @@ pub const SwitchGotoHandler = struct {
         self.goto_table.deinit(allocator);
     }
     pub fn newState(self: *@This(), allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
+        self.num_states += 1;
         try self.goto_table.append(allocator, .empty);
     }
     pub fn goto(self: *@This(), allocator: std.mem.Allocator, nt: u32, state: u32) std.mem.Allocator.Error!void {
         const row = &self.goto_table.items[self.goto_table.items.len - 1];
         try row.append(allocator, .{ .nonterminal = nt, .new_state = state });
     }
-    pub fn writeGotoMethod(self: *@This(), emitter: *ZigEmitter, symbol_spec: *const sym.SymbolSpec, num_states: u32) std.Io.Writer.Error!void {
+    pub fn writeGotoMethod(self: *@This(), allocator: std.mem.Allocator, emitter: *ZigEmitter, symbol_spec: *const sym.SymbolSpec) std.Io.Writer.Error!void {
+        _ = allocator;
         try emitter.implementGotoTable();
         try emitter.writeLine("return switch (state) {");
         emitter.indent(); // outer switch
@@ -624,12 +627,210 @@ pub const SwitchGotoHandler = struct {
             try emitter.out.writeAll("},\n");
         }
         // Zig disallows extraneous else prong
-        if (skipped_prong or self.goto_table.items.len < (@as(usize, 1) << @intCast(emitter.stateBits(num_states)))) {
+        if (skipped_prong or self.goto_table.items.len < (@as(usize, 1) << @intCast(emitter.stateBits(self.num_states)))) {
             try emitter.writeLine("else => unreachable");
         }
         emitter.dedent(); // end outer switch
         try emitter.writeLine("};");
         try emitter.endMethod();
+    }
+};
+
+/// Packed array GOTO table handler, similar to how ACTION tables get
+/// compressed. Theoretically, we use GOTO[state][nonterminal], but in packing
+/// it's better to index by the nonterminal first and use state as offset,
+/// since states are more likely to be "distinct" (not every state will have
+/// a nonempty GOTO row, but every nonterminal will be used to transition in
+/// some row). The arrays involved are:
+/// - packed: compressed array of state (nullable)
+/// - base: offset in packed for each nonterminal (non-nullable)
+pub const PackerGotoHandler = struct {
+    /// GOTO[nonterminal][state] (note the indices order), initialized upon
+    /// `begin` call.
+    table: []std.ArrayList(Entry) = undefined,
+    new_state_count: u32 = 0,
+
+    /// A single cell in GOTO
+    const Entry = struct {
+        /// On this state, when seeing the row's nonterminal...
+        state: u32,
+        /// Transition to this new state.
+        new_state: u32,
+    };
+
+    pub fn begin(self: *@This(), allocator: std.mem.Allocator, symbol_spec: *const sym.SymbolSpec) std.mem.Allocator.Error!void {
+        const num_nts = symbol_spec.nonterminals.count;
+        const table = try allocator.alloc(std.ArrayList(Entry), num_nts);
+        errdefer allocator.free(table);
+        @memset(table, .empty);
+        self.table = table;
+    }
+    pub fn free(self: *@This(), allocator: std.mem.Allocator) void {
+        for (self.table) |*row| {
+            row.deinit(allocator);
+        }
+        allocator.free(self.table);
+    }
+    pub fn newState(self: *@This(), allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
+        _ = allocator;
+        self.new_state_count += 1;
+    }
+    fn currentState(self: @This()) u32 {
+        return self.new_state_count - 1;
+    }
+    pub fn goto(self: *@This(), allocator: std.mem.Allocator, nt: u32, state: u32) std.mem.Allocator.Error!void {
+        try self.table[nt].append(allocator, .{ .state = self.currentState(), .new_state = state });
+    }
+
+    /// For sorting heuristic
+    const SortEntry = struct {
+        /// Which nonterminal?
+        row: u32,
+        /// Minimum state that is an exception
+        min_column: u32,
+        /// Maximum state that is an exception
+        max_column: u32,
+
+        fn noException(row: u32) @This() {
+            return .{ .row = row, .min_column = std.math.maxInt(u32), .max_column = 0 };
+        }
+
+        fn isNoException(self: @This()) bool {
+            return self.max_column < self.min_column;
+        }
+
+        fn width(self: @This()) u32 {
+            // The only overflow case is when `noException`
+            // Put no exceptions to last - they simply get an undefined base, since
+            // only valid GOTO queries are made (never reject). A nonterminal
+            // that does not appear in the GOTO table is also unused.
+            return self.max_column -| self.min_column;
+        }
+
+        /// Wider rows come first.
+        fn lessThan(_: void, a: @This(), b: @This()) bool {
+            const aw = a.width();
+            const bw = b.width();
+            // Stable sort key
+            return aw > bw or (aw == bw and (a.min_column > b.min_column or (a.min_column == b.min_column and a.row < b.row)));
+        }
+    };
+
+    /// Similar logic to `Packer`, but rejecting has undefined behavior, so
+    /// more aggressive optimization can be done.
+    pub fn writeGotoMethod(self: *@This(), allocator: std.mem.Allocator, emitter: *ZigEmitter, symbol_spec: *const sym.SymbolSpec) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
+        const num_nts = symbol_spec.nonterminals.count;
+        // Create temporary tables
+        const Offset = isize;
+        var t_base = try allocator.alloc(Offset, num_nts);
+        defer allocator.free(t_base);
+        // Unlike in `Packer`, we can always share a base since accessing a
+        // GOTO entry that has no number in it has undefined behavior.
+        // TODO: memory optimization (4 bytes for one bit?)
+        var t_packed: std.ArrayList(?u32) = .empty;
+        defer t_packed.deinit(allocator);
+        // Pack the rows into tables
+        // First sort rows
+        var sort_entries = try allocator.alloc(SortEntry, num_nts);
+        defer allocator.free(sort_entries);
+        for (self.table, 0..) |row, i| {
+            const nt: u32 = @intCast(i);
+            sort_entries[nt] = if (row.items.len == 0) .noException(nt) else blk: {
+                var min: u32 = std.math.maxInt(u32);
+                var max: u32 = 0;
+                for (row.items) |entry| {
+                    min = @min(min, entry.state);
+                    max = @max(max, entry.state);
+                }
+                break :blk .{ .row = nt, .min_column = min, .max_column = max };
+            };
+        }
+        std.mem.sortUnstable(SortEntry, sort_entries, {}, SortEntry.lessThan);
+        // Now pack them in according to that order.
+        var low_zero: usize = 0; // Lowest unoccupied index in packed, a nonnegative `Offset`
+        var max_nonnegative_base: Offset = 0; // Nonnegative
+        for (sort_entries) |sort_entry| {
+            const nt = sort_entry.row;
+            if (sort_entry.isNoException()) {
+                // If row is empty (no exception), we assign undefined as
+                // mentioned in `SortEntry.lessThan`. That means any value
+                // works below. Use 0 to avoid overflow.
+                t_base[nt] = 0;
+                continue;
+            }
+            // Find a spot in packed table to insert the row (greedy).
+            const n = t_packed.items.len;
+            // Base defaults to n, when no candidate below n works.
+            var base: Offset = @intCast(n);
+            // Any candidate before this must fail:
+            const min_candidate = @as(Offset, @intCast(low_zero)) - @as(Offset, @intCast(sort_entry.min_column));
+            var candidate: Offset = min_candidate;
+            // Cannot use range since candidate can be negative.
+            candidate_check: while (candidate < @as(Offset, @intCast(n))) : (candidate += 1) {
+                for (self.table[nt].items) |entry| {
+                    // @intCast for 32-bit platforms:
+                    const i = candidate + @as(Offset, @intCast(entry.state));
+                    if (0 < i and i < n and t_packed.items[@intCast(i)] != null) {
+                        continue :candidate_check;
+                    }
+                }
+                // This candidate works!
+                base = candidate;
+                break;
+            }
+            // Once we've found a spot, or we've decided no existing offset works
+            // as base, we can insert the row.
+            t_base[nt] = base;
+            max_nonnegative_base = @max(max_nonnegative_base, base);
+            // The @intCast is necessary on 32-bit platforms:
+            const size_to_ensure = base + @as(Offset, @intCast(sort_entry.max_column)) + 1;
+            std.debug.assert(size_to_ensure > 0);
+            const size_to_extend = @as(usize, @intCast(size_to_ensure)) -| n;
+            try t_packed.appendNTimes(allocator, null, size_to_extend);
+            // Now fill in the packed table.
+            for (self.table[nt].items) |entry| {
+                const i = base + @as(Offset, @intCast(entry.state));
+                std.debug.assert(i >= 0);
+                std.debug.assert(t_packed.items[@intCast(i)] == null);
+                t_packed.items[@intCast(i)] = entry.new_state;
+            }
+            // Update low_zero if some cells become occupied.
+            while (low_zero < t_packed.items.len and t_packed.items[low_zero] != null) {
+                low_zero += 1;
+            }
+        }
+        // Now emit code.
+        try emitter.implementGotoTable();
+        // Similar to `Packed`:
+        const extreme_offset = @as(usize, @intCast(max_nonnegative_base)) + self.new_state_count;
+        const offset_bits = 1 + std.math.log2_int_ceil(usize, extreme_offset + 1);
+        try emitter.printLine("const Offset = i{};", .{offset_bits});
+        const packed_len = t_packed.items.len;
+        const packed_bits = if (packed_len == 0) 0 else std.math.log2_int_ceil(usize, packed_len);
+        try emitter.printLine("const PackedIndex = u{};", .{packed_bits});
+        try emitter.writeIndent();
+        try emitter.out.writeAll("const base = [_]Offset{");
+        for (t_base) |x| {
+            try emitter.out.print("{},", .{x});
+        }
+        try emitter.out.writeAll("};\n");
+        try emitter.writeIndent();
+        try emitter.out.writeAll("const @\"packed\" = [_]StateSize{");
+        for (t_packed.items) |opt_entry| {
+            if (opt_entry) |entry| {
+                try emitter.out.print("{}", .{entry});
+            } else {
+                try emitter.out.writeAll("undefined");
+            }
+            try emitter.out.writeByte(',');
+        }
+        try emitter.out.writeAll("};\n");
+        try emitter.writeLines(
+            // No error checking / rejection makes it so much simpler!
+            \\const I: PackedIndex = @intCast(base[nt] + state);
+            \\return @"packed"[I];
+        );
+        try emitter.endMethod(); // end gotoTable
     }
 };
 
@@ -645,6 +846,7 @@ pub const Lr0SwitchBackend = struct {
     productions: *const cfg.CfgProductions = undefined,
     /// ACTION[state][terminal]
     action_table: std.ArrayList(Lr0ActionRow) = .empty,
+    /// TODO: make this generic
     goto_handler: SwitchGotoHandler = .{},
     /// If there is a conflict, it will be logged to here.
     conflict_report: ?ReportedConflict(lr0.Item) = null,
@@ -725,8 +927,8 @@ pub const Lr0SwitchBackend = struct {
         try self.emitter.writeProlog(self.symbol_spec, self.productions);
         // try lr0ActionTableToActionMethodSwitch(&self.emitter, self.symbol_spec, self.productions, self.action_table.items);
         try lr0ActionTableToActionMethodPacked(&self.emitter, self.symbol_spec, self.productions, self.action_table.items, self.allocator);
+        try self.goto_handler.writeGotoMethod(self.allocator, &self.emitter, self.symbol_spec);
         const num_states: u32 = @intCast(self.states.?.items.len);
-        try self.goto_handler.writeGotoMethod(&self.emitter, self.symbol_spec, num_states);
         try self.emitter.writeEpilog(num_states);
     }
 
@@ -1292,8 +1494,10 @@ fn Packer(comptime Backend: type) type {
             try emitter.writeLine("const Packed = struct {");
             emitter.indent(); // struct Packed
             // The runtime `Offset` type must be able to hold:
-            // - A minimum of -total_terminals
+            // - A minimum of -total_terminals (or rather minimum base)
             // - A maximum of maximum base + total_terminals
+            // - For Offset to win in peer type resolution with Token.TagSize:
+            //   a maximum of total_terminals.
             const extreme_offset = @max(0, self.max_base) + self.symbol_spec.terminals.count;
             std.debug.assert(extreme_offset > 0);
             // iN range is [-2**(i-1), 2**(i-1))
@@ -1949,6 +2153,10 @@ pub fn SlrBackend(comptime ConflictResolver: type, comptime GotoHandler: type) t
                 productions,
                 self.conflict_resolver,
             );
+            if (std.meta.hasMethod(GotoHandler, "begin")) {
+                // Optional GOTO handler initializer
+                try self.goto_handler.begin(self.allocator, symbol_spec);
+            }
         }
         pub fn beginState(self: *@This()) Error!void {
             self.state_counter += 1;
@@ -1998,8 +2206,8 @@ pub fn SlrBackend(comptime ConflictResolver: type, comptime GotoHandler: type) t
             try self.emitter.writeProlog(self.symbol_spec, self.productions);
             try self.action_handler.done(self.allocator);
             try actionTableToActionMethodPacked(self.symbol_spec, self.productions, self.action_handler.action_table, &self.emitter, self.allocator);
+            try self.goto_handler.writeGotoMethod(self.allocator, &self.emitter, self.symbol_spec);
             const num_states: u32 = @intCast(self.states.?.items.len);
-            try self.goto_handler.writeGotoMethod(&self.emitter, self.symbol_spec, num_states);
             try self.emitter.writeEpilog(num_states);
         }
     };
