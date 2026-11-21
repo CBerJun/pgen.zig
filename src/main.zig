@@ -17,6 +17,7 @@ const ParsedArgs = struct {
     dump_cfg: bool = false,
     dump_states: bool = false,
     rr_resolver_tag: pgen.conflict_resolver.RRResolverTag = .graph_scan,
+    packing: pgen.driver.Driver.Config.Packing = .@"packed",
     help: bool = false,
 
     pub fn deinit(self: *@This()) void {
@@ -43,7 +44,8 @@ const CliParser = struct {
         \\    -a ALGORITHM      Table gen algorithm to use (slr (default), lr0)
         \\    -cst-owns-token   If set, `CSTNode`s will own the passed in tokens. There is implication on mem management. See generated source's doc.
         \\    -token-extra CODE Extra source code to add into the `Token` struct
-        \\    -rr-resolver TAG  Reduce-reduce conflict resolver (graph_scan, dp)
+        \\    -rr-resolver TAG  Reduce-reduce conflict resolver (graph_scan (default), dp)
+        \\    -packing TAG      Table packing strategy (packed (default), nested_switch)
         \\    -h                Print this message and exit
         \\
         \\Debug options for developers:
@@ -148,6 +150,16 @@ const CliParser = struct {
                     self.aggregator.add(.fatal, "expected parameter following -rr-resolver", .{});
                     return error.CliParseError;
                 }
+            } else if (std.mem.eql(u8, rest, "packing")) {
+                if (self.iterator.next()) |payload| {
+                    ans.packing = std.meta.stringToEnum(@TypeOf(ans.packing), payload) orelse {
+                        self.aggregator.add(.fatal, "invalid packing strategy {s}", .{payload});
+                        return error.CliParseError;
+                    };
+                } else {
+                    self.aggregator.add(.fatal, "expected parameter following -packing", .{});
+                    return error.CliParseError;
+                }
             } else {
                 self.aggregator.add(.fatal, "unrecognized argument -{s}", .{rest});
                 return error.CliParseError;
@@ -222,6 +234,8 @@ fn mainInner(init: std.process.Init, gpa: std.mem.Allocator, stderr: *std.Io.Wri
         .token_extra = token_extra,
         .dump_cfg = cli.dump_cfg,
         .dump_states = cli.dump_states,
+        .packing = cli.packing,
+        .rr_resolver_tag = cli.rr_resolver_tag,
     });
     driver.go() catch |err| return switch (err) {
         error.GrammarError => error.UserError, // Already logged

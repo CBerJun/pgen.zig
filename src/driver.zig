@@ -34,6 +34,14 @@ pub const Driver = struct {
         // `.graph_scan` should work fine in most cases when there aren't too
         // many queries.
         rr_resolver_tag: pgen_core.conflict_resolver.RRResolverTag = .graph_scan,
+        packing: Packing = .@"packed",
+
+        /// ACTION/GOTO table packing strategy
+        pub const Packing = enum {
+            /// Most efficient, packs tables into linear arrays
+            @"packed",
+            nested_switch,
+        };
     };
 
     pub fn init(allocator: std.mem.Allocator, input: *std.Io.Reader, stderr: *std.Io.Writer, output: *std.Io.Writer, config: Config) @This() {
@@ -162,53 +170,59 @@ pub const Driver = struct {
                     // Well, the trick again.
                     inline else => |has_cr| break :outer {
                         const cr_passed = if (has_cr) conflict_resolver.? else {};
-                        var backend = if (algo == .lr0) pgen_core.backends.Lr0SwitchBackend{
-                            .emitter = zig_emitter,
-                        } else blk: {
-                            const follow_set = try ds.getFollowSet();
-                            break :blk pgen_core.backends.SlrBackend(
-                                @TypeOf(cr_passed),
-                                pgen_core.backends.SwitchGotoHandler,
-                            ){
-                                .emitter = zig_emitter,
-                                .follow_sets = &follow_set,
-                                .goto_handler = .{},
-                                .conflict_resolver = cr_passed,
-                            };
-                        };
-                        defer backend.free();
-                        pgen_core.lr0.lr0(
-                            cfg_managed.symbol_spec,
-                            cfg_managed.productions,
-                            tarjan,
-                            first_reachability,
-                            @TypeOf(backend),
-                            &backend,
-                            self.allocator,
-                            self.config.dump_states,
-                        ) catch |err| return switch (err) {
-                            error.LrConflict => blk: {
-                                // TODO: suggest the priority/precedence declarations
-                                try self.stderr.writeAll(
-                                    \\table gen conflict: grammar is ambiguous or not compatible with the selected algorithm
-                                    \\you might be able to resolve conflicts caused by ambiguous grammar using precedence or priority declaration
-                                    \\
-                                );
-                                // Both LR(0) and SLR backends have `conflict_report`.
-                                const cr = backend.conflict_report.?;
-                                try explain.conflict(
-                                    self.allocator,
-                                    pgen_core.lr0.Item,
-                                    self.stderr,
+                        const ConflictResolver = @TypeOf(cr_passed);
+                        switch (self.config.packing) {
+                            inline else => |packing| {
+                                // TODO: this is too deeply nested
+                                const goto_handler = if (packing == .@"packed") pgen_core.backends.PackerGotoHandler{} else pgen_core.backends.SwitchGotoHandler{};
+                                const GotoHandler = @TypeOf(goto_handler);
+                                var backend = if (algo == .lr0) pgen_core.backends.Lr0SwitchBackend(GotoHandler){
+                                    .emitter = zig_emitter,
+                                    .goto_handler = goto_handler,
+                                } else blk: {
+                                    const follow_set = try ds.getFollowSet();
+                                    break :blk pgen_core.backends.SlrBackend(ConflictResolver, GotoHandler){
+                                        .emitter = zig_emitter,
+                                        .follow_sets = &follow_set,
+                                        .goto_handler = goto_handler,
+                                        .conflict_resolver = cr_passed,
+                                    };
+                                };
+                                defer backend.free();
+                                pgen_core.lr0.lr0(
                                     cfg_managed.symbol_spec,
                                     cfg_managed.productions,
-                                    sym_diagnostic,
-                                    cr,
-                                );
-                                break :blk error.GrammarError;
+                                    tarjan,
+                                    first_reachability,
+                                    @TypeOf(backend),
+                                    &backend,
+                                    self.allocator,
+                                    self.config.dump_states,
+                                ) catch |err| return switch (err) {
+                                    error.LrConflict => blk: {
+                                        // TODO: suggest the priority/precedence declarations
+                                        try self.stderr.writeAll(
+                                            \\table gen conflict: grammar is ambiguous or not compatible with the selected algorithm
+                                            \\you might be able to resolve conflicts caused by ambiguous grammar using precedence or priority declaration
+                                            \\
+                                        );
+                                        // Both LR(0) and SLR backends have `conflict_report`.
+                                        const cr = backend.conflict_report.?;
+                                        try explain.conflict(
+                                            self.allocator,
+                                            pgen_core.lr0.Item,
+                                            self.stderr,
+                                            cfg_managed.symbol_spec,
+                                            cfg_managed.productions,
+                                            sym_diagnostic,
+                                            cr,
+                                        );
+                                        break :blk error.GrammarError;
+                                    },
+                                    else => |e| e,
+                                };
                             },
-                            else => |e| e,
-                        };
+                        }
                     },
                 }
             },

@@ -836,115 +836,120 @@ pub const PackerGotoHandler = struct {
 
 /// Naive LR(0) backend that emits Zig source with
 /// **no conflict resolution** using switch statements for all mappings.
-pub const Lr0SwitchBackend = struct {
-    emitter: ZigEmitter,
-    // Internal fields:
-    /// A `states` of `null` means `beginTableGen` has not been called.
-    states: ?*const std.ArrayList([]lr0.Item) = null,
-    allocator: std.mem.Allocator = undefined,
-    symbol_spec: *const sym.SymbolSpec = undefined,
-    productions: *const cfg.CfgProductions = undefined,
-    /// ACTION[state][terminal]
-    action_table: std.ArrayList(Lr0ActionRow) = .empty,
-    /// TODO: make this generic
-    goto_handler: SwitchGotoHandler = .{},
-    /// If there is a conflict, it will be logged to here.
-    conflict_report: ?ReportedConflict(lr0.Item) = null,
-    /// How many times `beginState` has been called
-    state_counter: u32 = 0,
+pub fn Lr0SwitchBackend(comptime GotoHandler: type) type {
+    return struct {
+        emitter: ZigEmitter,
+        // Internal fields:
+        /// A `states` of `null` means `beginTableGen` has not been called.
+        states: ?*const std.ArrayList([]lr0.Item) = null,
+        allocator: std.mem.Allocator = undefined,
+        symbol_spec: *const sym.SymbolSpec = undefined,
+        productions: *const cfg.CfgProductions = undefined,
+        /// ACTION[state][terminal]
+        action_table: std.ArrayList(Lr0ActionRow) = .empty,
+        goto_handler: GotoHandler,
+        /// If there is a conflict, it will be logged to here.
+        conflict_report: ?ReportedConflict(lr0.Item) = null,
+        /// How many times `beginState` has been called
+        state_counter: u32 = 0,
 
-    pub fn free(self: *@This()) void {
-        if (self.states == null) {
-            return;
+        pub fn free(self: *@This()) void {
+            if (self.states == null) {
+                return;
+            }
+            self.states = null;
+            for (self.action_table.items) |*row| {
+                row.free(self.allocator);
+            }
+            self.action_table.deinit(self.allocator);
+            self.goto_handler.free(self.allocator);
+            if (self.conflict_report) |cr| {
+                cr.free(self.allocator);
+            }
         }
-        self.states = null;
-        for (self.action_table.items) |*row| {
-            row.free(self.allocator);
-        }
-        self.action_table.deinit(self.allocator);
-        self.goto_handler.free(self.allocator);
-        if (self.conflict_report) |cr| {
-            cr.free(self.allocator);
-        }
-    }
 
-    pub const Error = ConflictError || std.Io.Writer.Error || std.mem.Allocator.Error;
+        pub const Error = ConflictError || std.Io.Writer.Error || std.mem.Allocator.Error;
 
-    pub fn beginTableGen(self: *@This(), symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, states: *const std.ArrayList([]lr0.Item), allocator: std.mem.Allocator) Error!void {
-        self.states = states;
-        self.allocator = allocator;
-        self.symbol_spec = symbol_spec;
-        self.productions = productions;
-    }
-    pub fn beginState(self: *@This()) Error!void {
-        self.state_counter += 1;
-        try self.action_table.append(self.allocator, .reject);
-        try self.goto_handler.newState(self.allocator);
-    }
-    pub fn acceptOnEoi(self: *@This()) Error!void {
-        // `state` can be anything.
-        try self.shift(self.symbol_spec.terminals.eoi, 0);
-    }
-    pub fn reduce(self: *@This(), production: u32) Error!void {
-        const row = &self.action_table.items[self.action_table.items.len - 1];
-        switch (row.*) {
-            .reject => {
-                row.* = .{ .reduce = production };
-            },
-            .shift => unreachable, // all reduce calls come after all shifts calls
-            .reduce => |other_prod| {
-                try self.reportConflict(
-                    .{ .reduce = other_prod },
-                    .{ .reduce = production },
-                    null,
-                );
-                return ConflictError.LrConflict;
-            },
+        pub fn beginTableGen(self: *@This(), symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, states: *const std.ArrayList([]lr0.Item), allocator: std.mem.Allocator) Error!void {
+            self.states = states;
+            self.allocator = allocator;
+            self.symbol_spec = symbol_spec;
+            self.productions = productions;
+            if (std.meta.hasMethod(GotoHandler, "begin")) {
+                // Optional GOTO handler initializer
+                try self.goto_handler.begin(allocator, symbol_spec);
+            }
         }
-    }
-    pub fn goto(self: *@This(), nt: u32, state: u32) Error!void {
-        try self.goto_handler.goto(self.allocator, nt, state);
-    }
-    pub fn shift(self: *@This(), terminal: u32, state: u32) Error!void {
-        const row = &self.action_table.items[self.action_table.items.len - 1];
-        switch (row.*) {
-            .reject => {
-                row.* = .{ .shift = .empty };
-            },
-            .shift => {},
-            .reduce => |reduce_by| {
-                try self.reportConflict(
-                    .{ .shift = state },
-                    .{ .reduce = reduce_by },
-                    terminal,
-                );
-                return ConflictError.LrConflict;
-            },
+        pub fn beginState(self: *@This()) Error!void {
+            self.state_counter += 1;
+            try self.action_table.append(self.allocator, .reject);
+            try self.goto_handler.newState(self.allocator);
         }
-        try row.shift.append(self.allocator, .{ .terminal = terminal, .new_state = state });
-    }
-    pub fn endTableGen(self: *@This()) Error!void {
-        try self.emitter.writeProlog(self.symbol_spec, self.productions);
-        // try lr0ActionTableToActionMethodSwitch(&self.emitter, self.symbol_spec, self.productions, self.action_table.items);
-        try lr0ActionTableToActionMethodPacked(&self.emitter, self.symbol_spec, self.productions, self.action_table.items, self.allocator);
-        try self.goto_handler.writeGotoMethod(self.allocator, &self.emitter, self.symbol_spec);
-        const num_states: u32 = @intCast(self.states.?.items.len);
-        try self.emitter.writeEpilog(num_states);
-    }
+        pub fn acceptOnEoi(self: *@This()) Error!void {
+            // `state` can be anything.
+            try self.shift(self.symbol_spec.terminals.eoi, 0);
+        }
+        pub fn reduce(self: *@This(), production: u32) Error!void {
+            const row = &self.action_table.items[self.action_table.items.len - 1];
+            switch (row.*) {
+                .reject => {
+                    row.* = .{ .reduce = production };
+                },
+                .shift => unreachable, // all reduce calls come after all shifts calls
+                .reduce => |other_prod| {
+                    try self.reportConflict(
+                        .{ .reduce = other_prod },
+                        .{ .reduce = production },
+                        null,
+                    );
+                    return ConflictError.LrConflict;
+                },
+            }
+        }
+        pub fn goto(self: *@This(), nt: u32, state: u32) Error!void {
+            try self.goto_handler.goto(self.allocator, nt, state);
+        }
+        pub fn shift(self: *@This(), terminal: u32, state: u32) Error!void {
+            const row = &self.action_table.items[self.action_table.items.len - 1];
+            switch (row.*) {
+                .reject => {
+                    row.* = .{ .shift = .empty };
+                },
+                .shift => {},
+                .reduce => |reduce_by| {
+                    try self.reportConflict(
+                        .{ .shift = state },
+                        .{ .reduce = reduce_by },
+                        terminal,
+                    );
+                    return ConflictError.LrConflict;
+                },
+            }
+            try row.shift.append(self.allocator, .{ .terminal = terminal, .new_state = state });
+        }
+        pub fn endTableGen(self: *@This()) Error!void {
+            try self.emitter.writeProlog(self.symbol_spec, self.productions);
+            // try lr0ActionTableToActionMethodSwitch(&self.emitter, self.symbol_spec, self.productions, self.action_table.items);
+            try lr0ActionTableToActionMethodPacked(&self.emitter, self.symbol_spec, self.productions, self.action_table.items, self.allocator);
+            try self.goto_handler.writeGotoMethod(self.allocator, &self.emitter, self.symbol_spec);
+            const num_states: u32 = @intCast(self.states.?.items.len);
+            try self.emitter.writeEpilog(num_states);
+        }
 
-    /// Report a conflict at current state. We don't have conflict resolution
-    /// support since we assume if a state can reduce it must reduce for all
-    /// lookahead tokens.
-    fn reportConflict(self: *@This(), action1: Action, action2: Action, lookahead: ?u32) std.mem.Allocator.Error!void {
-        const copied_core_set = try self.allocator.dupe(lr0.Item, self.states.?.items[self.state_counter - 1]);
-        self.conflict_report = .{
-            .action1 = action1,
-            .action2 = action2,
-            .lookahead = lookahead,
-            .core_set = copied_core_set,
-        };
-    }
-};
+        /// Report a conflict at current state. We don't have conflict resolution
+        /// support since we assume if a state can reduce it must reduce for all
+        /// lookahead tokens.
+        fn reportConflict(self: *@This(), action1: Action, action2: Action, lookahead: ?u32) std.mem.Allocator.Error!void {
+            const copied_core_set = try self.allocator.dupe(lr0.Item, self.states.?.items[self.state_counter - 1]);
+            self.conflict_report = .{
+                .action1 = action1,
+                .action2 = action2,
+                .lookahead = lookahead,
+                .core_set = copied_core_set,
+            };
+        }
+    };
+}
 
 fn lr0ActionTableToActionMethodSwitch(emitter: *ZigEmitter, symbol_spec: *const sym.SymbolSpec, productions: *const cfg.CfgProductions, actions: []Lr0ActionRow) std.Io.Writer.Error!void {
     try emitter.implementAction();
@@ -2155,7 +2160,7 @@ pub fn SlrBackend(comptime ConflictResolver: type, comptime GotoHandler: type) t
             );
             if (std.meta.hasMethod(GotoHandler, "begin")) {
                 // Optional GOTO handler initializer
-                try self.goto_handler.begin(self.allocator, symbol_spec);
+                try self.goto_handler.begin(allocator, symbol_spec);
             }
         }
         pub fn beginState(self: *@This()) Error!void {
