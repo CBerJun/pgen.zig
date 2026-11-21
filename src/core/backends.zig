@@ -834,6 +834,14 @@ pub const PackerGotoHandler = struct {
     }
 };
 
+/// ACTION/GOTO table packing strategy
+pub const PackingTag = enum {
+    /// Most efficient, packs tables into linear arrays
+    @"packed",
+    /// `switch` inside `switch`
+    nested_switch,
+};
+
 /// Naive LR(0) backend that emits Zig source with
 /// **no conflict resolution** using switch statements for all mappings.
 pub fn Lr0SwitchBackend(comptime GotoHandler: type) type {
@@ -852,6 +860,8 @@ pub fn Lr0SwitchBackend(comptime GotoHandler: type) type {
         conflict_report: ?ReportedConflict(lr0.Item) = null,
         /// How many times `beginState` has been called
         state_counter: u32 = 0,
+        /// Packing preference for ACTION table
+        action_packing: PackingTag,
 
         pub fn free(self: *@This()) void {
             if (self.states == null) {
@@ -929,8 +939,10 @@ pub fn Lr0SwitchBackend(comptime GotoHandler: type) type {
         }
         pub fn endTableGen(self: *@This()) Error!void {
             try self.emitter.writeProlog(self.symbol_spec, self.productions);
-            // try lr0ActionTableToActionMethodSwitch(self.emitter, self.symbol_spec, self.productions, self.action_table.items);
-            try lr0ActionTableToActionMethodPacked(self.emitter, self.symbol_spec, self.productions, self.action_table.items, self.allocator);
+            try switch (self.action_packing) {
+                .@"packed" => lr0ActionTableToActionMethodPacked(self.emitter, self.symbol_spec, self.productions, self.action_table.items, self.allocator),
+                .nested_switch => try lr0ActionTableToActionMethodSwitch(self.emitter, self.symbol_spec, self.productions, self.action_table.items),
+            };
             try self.goto_handler.writeGotoMethod(self.allocator, self.emitter, self.symbol_spec);
             const num_states: u32 = @intCast(self.states.?.items.len);
             try self.emitter.writeEpilog(num_states);
@@ -2133,6 +2145,8 @@ pub fn SlrBackend(comptime ConflictResolver: type, comptime GotoHandler: type) t
         allocator: std.mem.Allocator = undefined,
         symbol_spec: *const sym.SymbolSpec = undefined,
         productions: *const cfg.CfgProductions = undefined,
+        /// Packing preference for ACTION table
+        action_packing: PackingTag,
 
         pub fn free(self: *@This()) void {
             if (self.states == null) {
@@ -2210,7 +2224,10 @@ pub fn SlrBackend(comptime ConflictResolver: type, comptime GotoHandler: type) t
         pub fn endTableGen(self: *@This()) Error!void {
             try self.emitter.writeProlog(self.symbol_spec, self.productions);
             try self.action_handler.done(self.allocator);
-            try actionTableToActionMethodPacked(self.symbol_spec, self.productions, self.action_handler.action_table, self.emitter, self.allocator);
+            try switch (self.action_packing) {
+                .@"packed" => actionTableToActionMethodPacked(self.symbol_spec, self.productions, self.action_handler.action_table, self.emitter, self.allocator),
+                .nested_switch => actionTableToActionMethodSwitch(self.symbol_spec, self.productions, self.action_handler.action_table, self.emitter),
+            };
             try self.goto_handler.writeGotoMethod(self.allocator, self.emitter, self.symbol_spec);
             const num_states: u32 = @intCast(self.states.?.items.len);
             try self.emitter.writeEpilog(num_states);

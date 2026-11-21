@@ -34,14 +34,7 @@ pub const Driver = struct {
         // `.graph_scan` should work fine in most cases when there aren't too
         // many queries.
         rr_resolver_tag: pgen_core.conflict_resolver.RRResolverTag = .graph_scan,
-        packing: Packing = .@"packed",
-
-        /// ACTION/GOTO table packing strategy
-        pub const Packing = enum {
-            /// Most efficient, packs tables into linear arrays
-            @"packed",
-            nested_switch,
-        };
+        packing: pgen_core.backends.PackingTag = .@"packed",
     };
 
     pub fn init(allocator: std.mem.Allocator, input: *std.Io.Reader, stderr: *std.Io.Writer, output: *std.Io.Writer, config: Config) @This() {
@@ -189,7 +182,7 @@ pub const Driver = struct {
         self: @This(),
         comptime algo: Algorithm,
         comptime has_cr: bool,
-        comptime packing: Config.Packing,
+        comptime packing: pgen_core.backends.PackingTag,
         conflict_resolver: anytype,
         zig_emitter: *pgen_core.backends.ZigEmitter,
         ds: *pgen_core.lr0.DataStructures,
@@ -205,6 +198,7 @@ pub const Driver = struct {
         var backend = if (algo == .lr0) pgen_core.backends.Lr0SwitchBackend(GotoHandler){
             .emitter = zig_emitter,
             .goto_handler = goto_handler,
+            .action_packing = packing,
         } else blk: {
             const follow_set = try ds.getFollowSet();
             break :blk pgen_core.backends.SlrBackend(ConflictResolver, GotoHandler){
@@ -212,6 +206,7 @@ pub const Driver = struct {
                 .follow_sets = &follow_set,
                 .goto_handler = goto_handler,
                 .conflict_resolver = cr_passed,
+                .action_packing = packing,
             };
         };
         defer backend.free();

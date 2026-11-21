@@ -71,6 +71,7 @@ pub fn main(init: std.process.Init) !void {
         .follow_sets = &follow_set,
         .conflict_resolver = {},
         .goto_handler = .{},
+        .action_packing = .@"packed",
     };
     defer backend.free();
     try pgen_core.lr0.lr0(

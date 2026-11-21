@@ -17,7 +17,7 @@ const ParsedArgs = struct {
     dump_cfg: bool = false,
     dump_states: bool = false,
     rr_resolver_tag: pgen.conflict_resolver.RRResolverTag = .graph_scan,
-    packing: pgen.driver.Driver.Config.Packing = .@"packed",
+    packing: pgen.backends.PackingTag = .@"packed",
     help: bool = false,
 
     pub fn deinit(self: *@This()) void {
