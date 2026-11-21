@@ -152,7 +152,7 @@ pub const Driver = struct {
         defer ds.deinit();
         const tarjan = try ds.getFirstTarjan();
         const first_reachability = try ds.getFirstReachability();
-        const zig_emitter: pgen_core.backends.ZigEmitter = .{
+        var zig_emitter: pgen_core.backends.ZigEmitter = .{
             .out = self.output,
             .token_extra = self.config.token_extra,
             .cst_owns_token = self.config.cst_owns_token,
@@ -161,66 +161,18 @@ pub const Driver = struct {
         const has_cr_runtime = conflict_resolver != null;
         switch (self.config.algorithm) {
             // Trick to force `algo` to be comptime available.
-            inline else => |algo| outer: {
-                if (algo == .lr0 and has_cr_runtime) {
-                    try self.stderr.writeAll("LR(0) currently does not support conflict resolution\n");
-                    return error.GrammarError;
-                }
+            inline else => |algo| {
                 switch (has_cr_runtime) {
                     // Well, the trick again.
-                    inline else => |has_cr| break :outer {
-                        const cr_passed = if (has_cr) conflict_resolver.? else {};
-                        const ConflictResolver = @TypeOf(cr_passed);
+                    inline else => |has_cr| {
+                        if (algo == .lr0 and has_cr) {
+                            // This if should be evaluated comptime
+                            try self.stderr.writeAll("LR(0) currently does not support conflict resolution\n");
+                            return error.GrammarError;
+                        }
                         switch (self.config.packing) {
                             inline else => |packing| {
-                                // TODO: this is too deeply nested
-                                const goto_handler = if (packing == .@"packed") pgen_core.backends.PackerGotoHandler{} else pgen_core.backends.SwitchGotoHandler{};
-                                const GotoHandler = @TypeOf(goto_handler);
-                                var backend = if (algo == .lr0) pgen_core.backends.Lr0SwitchBackend(GotoHandler){
-                                    .emitter = zig_emitter,
-                                    .goto_handler = goto_handler,
-                                } else blk: {
-                                    const follow_set = try ds.getFollowSet();
-                                    break :blk pgen_core.backends.SlrBackend(ConflictResolver, GotoHandler){
-                                        .emitter = zig_emitter,
-                                        .follow_sets = &follow_set,
-                                        .goto_handler = goto_handler,
-                                        .conflict_resolver = cr_passed,
-                                    };
-                                };
-                                defer backend.free();
-                                pgen_core.lr0.lr0(
-                                    cfg_managed.symbol_spec,
-                                    cfg_managed.productions,
-                                    tarjan,
-                                    first_reachability,
-                                    @TypeOf(backend),
-                                    &backend,
-                                    self.allocator,
-                                    self.config.dump_states,
-                                ) catch |err| return switch (err) {
-                                    error.LrConflict => blk: {
-                                        // TODO: suggest the priority/precedence declarations
-                                        try self.stderr.writeAll(
-                                            \\table gen conflict: grammar is ambiguous or not compatible with the selected algorithm
-                                            \\you might be able to resolve conflicts caused by ambiguous grammar using precedence or priority declaration
-                                            \\
-                                        );
-                                        // Both LR(0) and SLR backends have `conflict_report`.
-                                        const cr = backend.conflict_report.?;
-                                        try explain.conflict(
-                                            self.allocator,
-                                            pgen_core.lr0.Item,
-                                            self.stderr,
-                                            cfg_managed.symbol_spec,
-                                            cfg_managed.productions,
-                                            sym_diagnostic,
-                                            cr,
-                                        );
-                                        break :blk error.GrammarError;
-                                    },
-                                    else => |e| e,
-                                };
+                                try self.goBackend(algo, has_cr, packing, conflict_resolver, &zig_emitter, &ds, &cfg_managed, tarjan, first_reachability, sym_diagnostic);
                             },
                         }
                     },
@@ -228,5 +180,72 @@ pub const Driver = struct {
             },
         }
         try self.output.flush();
+    }
+
+    /// This exists so we don't have a too-deep indent level
+    /// Note that this function will be expanded several times during comptime
+    /// evaluation! So put minimal logic here to reduce code size.
+    fn goBackend(
+        self: @This(),
+        comptime algo: Algorithm,
+        comptime has_cr: bool,
+        comptime packing: Config.Packing,
+        conflict_resolver: anytype,
+        zig_emitter: *pgen_core.backends.ZigEmitter,
+        ds: *pgen_core.lr0.DataStructures,
+        cfg_managed: *pgen_core.ast2cfg.CfgManaged,
+        tarjan: pgen_core.digraph.TarjanSccResult,
+        first_reachability: pgen_core.digraph.ReachDpResult,
+        sym_diagnostic: pgen_core.sym.DiagnosticInfo,
+    ) Error!void {
+        const cr_passed = if (has_cr) conflict_resolver.? else {};
+        const ConflictResolver = @TypeOf(cr_passed);
+        const goto_handler = if (packing == .@"packed") pgen_core.backends.PackerGotoHandler{} else pgen_core.backends.SwitchGotoHandler{};
+        const GotoHandler = @TypeOf(goto_handler);
+        var backend = if (algo == .lr0) pgen_core.backends.Lr0SwitchBackend(GotoHandler){
+            .emitter = zig_emitter,
+            .goto_handler = goto_handler,
+        } else blk: {
+            const follow_set = try ds.getFollowSet();
+            break :blk pgen_core.backends.SlrBackend(ConflictResolver, GotoHandler){
+                .emitter = zig_emitter,
+                .follow_sets = &follow_set,
+                .goto_handler = goto_handler,
+                .conflict_resolver = cr_passed,
+            };
+        };
+        defer backend.free();
+        pgen_core.lr0.lr0(
+            cfg_managed.symbol_spec,
+            cfg_managed.productions,
+            tarjan,
+            first_reachability,
+            @TypeOf(backend),
+            &backend,
+            self.allocator,
+            self.config.dump_states,
+        ) catch |err| return switch (err) {
+            error.LrConflict => blk: {
+                // TODO: suggest the priority/precedence declarations
+                try self.stderr.writeAll(
+                    \\table gen conflict: grammar is ambiguous or not compatible with the selected algorithm
+                    \\you might be able to resolve conflicts caused by ambiguous grammar using precedence or priority declaration
+                    \\
+                );
+                // Both LR(0) and SLR backends have `conflict_report`.
+                const cr = backend.conflict_report.?;
+                try explain.conflict(
+                    self.allocator,
+                    pgen_core.lr0.Item,
+                    self.stderr,
+                    cfg_managed.symbol_spec,
+                    cfg_managed.productions,
+                    sym_diagnostic,
+                    cr,
+                );
+                break :blk error.GrammarError;
+            },
+            else => |e| e,
+        };
     }
 };

@@ -838,7 +838,7 @@ pub const PackerGotoHandler = struct {
 /// **no conflict resolution** using switch statements for all mappings.
 pub fn Lr0SwitchBackend(comptime GotoHandler: type) type {
     return struct {
-        emitter: ZigEmitter,
+        emitter: *ZigEmitter,
         // Internal fields:
         /// A `states` of `null` means `beginTableGen` has not been called.
         states: ?*const std.ArrayList([]lr0.Item) = null,
@@ -929,9 +929,9 @@ pub fn Lr0SwitchBackend(comptime GotoHandler: type) type {
         }
         pub fn endTableGen(self: *@This()) Error!void {
             try self.emitter.writeProlog(self.symbol_spec, self.productions);
-            // try lr0ActionTableToActionMethodSwitch(&self.emitter, self.symbol_spec, self.productions, self.action_table.items);
-            try lr0ActionTableToActionMethodPacked(&self.emitter, self.symbol_spec, self.productions, self.action_table.items, self.allocator);
-            try self.goto_handler.writeGotoMethod(self.allocator, &self.emitter, self.symbol_spec);
+            // try lr0ActionTableToActionMethodSwitch(self.emitter, self.symbol_spec, self.productions, self.action_table.items);
+            try lr0ActionTableToActionMethodPacked(self.emitter, self.symbol_spec, self.productions, self.action_table.items, self.allocator);
+            try self.goto_handler.writeGotoMethod(self.allocator, self.emitter, self.symbol_spec);
             const num_states: u32 = @intCast(self.states.?.items.len);
             try self.emitter.writeEpilog(num_states);
         }
@@ -2114,7 +2114,7 @@ pub fn ReportedConflict(comptime Item: type) type {
 pub fn SlrBackend(comptime ConflictResolver: type, comptime GotoHandler: type) type {
     return struct {
         /// Controls output of source code
-        emitter: ZigEmitter,
+        emitter: *ZigEmitter,
         /// Precomputed FOLLOW sets for SLR
         follow_sets: *const lr0.DpBasedSets,
         /// Conflict resolver to forward to the action handler (borrowed)
@@ -2210,8 +2210,8 @@ pub fn SlrBackend(comptime ConflictResolver: type, comptime GotoHandler: type) t
         pub fn endTableGen(self: *@This()) Error!void {
             try self.emitter.writeProlog(self.symbol_spec, self.productions);
             try self.action_handler.done(self.allocator);
-            try actionTableToActionMethodPacked(self.symbol_spec, self.productions, self.action_handler.action_table, &self.emitter, self.allocator);
-            try self.goto_handler.writeGotoMethod(self.allocator, &self.emitter, self.symbol_spec);
+            try actionTableToActionMethodPacked(self.symbol_spec, self.productions, self.action_handler.action_table, self.emitter, self.allocator);
+            try self.goto_handler.writeGotoMethod(self.allocator, self.emitter, self.symbol_spec);
             const num_states: u32 = @intCast(self.states.?.items.len);
             try self.emitter.writeEpilog(num_states);
         }

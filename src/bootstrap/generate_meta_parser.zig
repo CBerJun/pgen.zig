@@ -30,43 +30,44 @@ pub fn main(init: std.process.Init) !void {
     var out_writer = file.writer(init.io, &out_buffer);
     const writer = &out_writer.interface;
 
+    var zig_emitter: pgen_core.backends.ZigEmitter = .{
+        .out = writer,
+        .token_extra = &.{
+            "payload: union {",
+            "    word: []const u8,",
+            "    str: struct {",
+            "        content: []const u8,",
+            "        suffix: []const u8,",
+            "    },",
+            "    none: void,",
+            "},",
+            "loc: Loc,",
+            "",
+            "/// `ln` and `col` are 0-indexed.",
+            "pub const Loc = struct {ln: usize, col: usize};",
+            "",
+            "pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {",
+            "    switch (self.tag) {",
+            "        .WORD => allocator.free(self.payload.word),",
+            "        .STRING => {",
+            "            allocator.free(self.payload.str.content);",
+            "            allocator.free(self.payload.str.suffix);",
+            "        },",
+            "        else => {},",
+            "    }",
+            "}",
+        },
+        .cst_owns_token = true,
+        // pgen will not work if anything exceeds u32 range since we
+        // extensively use u32 type in source code (e.g. terminal count).
+        .node_count_bits = 32,
+    };
     var backend: pgen_core.backends.SlrBackend(
         // Meta parser currently does not need conflict resolution
         void,
         pgen_core.backends.PackerGotoHandler,
     ) = .{
-        .emitter = .{
-            .out = writer,
-            .token_extra = &.{
-                "payload: union {",
-                "    word: []const u8,",
-                "    str: struct {",
-                "        content: []const u8,",
-                "        suffix: []const u8,",
-                "    },",
-                "    none: void,",
-                "},",
-                "loc: Loc,",
-                "",
-                "/// `ln` and `col` are 0-indexed.",
-                "pub const Loc = struct {ln: usize, col: usize};",
-                "",
-                "pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {",
-                "    switch (self.tag) {",
-                "        .WORD => allocator.free(self.payload.word),",
-                "        .STRING => {",
-                "            allocator.free(self.payload.str.content);",
-                "            allocator.free(self.payload.str.suffix);",
-                "        },",
-                "        else => {},",
-                "    }",
-                "}",
-            },
-            .cst_owns_token = true,
-            // pgen will not work if anything exceeds u32 range since we
-            // extensively use u32 type in source code (e.g. terminal count).
-            .node_count_bits = 32,
-        },
+        .emitter = &zig_emitter,
         .follow_sets = &follow_set,
         .conflict_resolver = {},
         .goto_handler = .{},
